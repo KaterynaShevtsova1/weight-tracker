@@ -7,14 +7,14 @@
 <title>Шлях до цілі — трекер схуднення</title>
 <style>
   :root{
-    --bg: #F6F2EA;
+    --bg: #F5F0FD;
     --panel: #FFFFFF;
-    --ink: #22312B;
-    --ink-soft: #5B6B62;
-    --line: #E3DCCC;
-    --teal: #1F3B36;
-    --teal-soft: #2E5148;
-    --gold: #C08A2E;
+    --ink: #2E1B4D;
+    --ink-soft: #7A6A9C;
+    --line: #E1D2F7;
+    --teal: #9333EA;
+    --teal-soft: #7C22CE;
+    --gold: #C026D3;
     --rose: #C4674F;
     --good: #3F7A5C;
     --bad: #B3543A;
@@ -52,7 +52,7 @@
   label:first-child{ margin-top:0; }
   input[type=number], input[type=date], input[type=url], input[type=text], select{
     width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px;
-    font-size:14px; font-family:inherit; background:#FCFAF6; color:var(--ink);
+    font-size:14px; font-family:inherit; background:#FAF5FE; color:var(--ink);
   }
   input:focus, select:focus{ outline:none; border-color:var(--teal-soft);}
   .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:14px;}
@@ -69,7 +69,7 @@
   }
   .stat-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
   @media (max-width:700px){ .stat-grid{ grid-template-columns:repeat(2,1fr);} }
-  .stat{ background:#FCFAF6; border:1px solid var(--line); border-radius:10px; padding:14px 16px;}
+  .stat{ background:#FAF5FE; border:1px solid var(--line); border-radius:10px; padding:14px 16px;}
   .stat .label{ font-size:11px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:0.5px;}
   .stat .value{ font-size:24px; margin-top:4px; }
   .stat .value.good{ color:var(--good); }
@@ -78,7 +78,7 @@
   table{ width:100%; border-collapse:collapse; font-size:13px; }
   th,td{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap;}
   th{ color:var(--ink-soft); font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:0.3px;}
-  tbody tr:hover{ background:#FBF7EF; }
+  tbody tr:hover{ background:#F3E8FD; }
   .tablewrap{ overflow-x:auto; }
   .pos{ color:var(--good); font-weight:600;}
   .neg{ color:var(--bad); font-weight:600;}
@@ -209,6 +209,7 @@ let tomorrowPlans = {};  // date -> {breakfast,lunch,dinner}
 let foodEntries = {};    // date -> array of {id,name,grams,kcal,protein,fat,carbs,source}
 let myRecipes = [];      // array of {id,name,kcal,protein,fat,carbs} saved custom dishes
 let currentTab = 'dashboard';
+let selectedMealDate = todayISO(); // which day the "Їжа" tab is currently editing
 
 async function loadAll(){
   try{
@@ -412,7 +413,7 @@ function attachConnectionHandlers(){
     loading = true;
     render();
     try{
-      await window.storage.list(''); // connectivity probe — throws on network/URL failure
+      await window.storage.list('');
       connectionStatus = 'ok';
       await loadAll();
     }catch(e){
@@ -818,7 +819,7 @@ function renderRecipes(){
     const fat = Math.round(c.fatG*m.pct);
     const carbs = Math.round(c.carbsG*m.pct);
     const recipes = RECIPES[key].map(r=>`
-      <div style="border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:10px; background:#FCFAF6;">
+      <div style="border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:10px; background:#FAF5FE;">
         <div class="row-flex">
           <b style="font-size:13.5px;">${r.name}</b>
           <span class="small muted">${r.kcal} ккал · Б${r.protein} Ж${r.fat} В${r.carbs}</span>
@@ -974,11 +975,26 @@ function getFittingRecipes(remaining){
 }
 
 function renderMeals(){
-  const today = todayISO();
+  const viewDate = selectedMealDate;
+  const isToday = viewDate === todayISO();
   const c = calc();
-  const entries = foodEntries[today] || [];
-  const totals = getDayMacroTotals(today);
-  const todaysPlan = tomorrowPlans[today]; // plans are stored keyed by the date they're FOR
+  const entries = foodEntries[viewDate] || [];
+  const totals = getDayMacroTotals(viewDate);
+  const todaysPlan = tomorrowPlans[viewDate]; // plans are stored keyed by the date they're FOR
+
+  const dateNav = `
+  <div class="card">
+    <div class="row-flex">
+      <h2 style="margin:0;">Який день редагуємо</h2>
+      <span class="small muted">${isToday? 'Сьогодні' : 'Заднім числом'}</span>
+    </div>
+    <div class="grid2" style="align-items:end;">
+      <div><label>Дата</label><input type="date" id="mealDatePicker" value="${viewDate}" max="${todayISO()}"></div>
+      <div><button class="ghost" id="mealDateTodayBtn" style="margin-top:0;">Повернутись до сьогодні</button></div>
+    </div>
+  </div>`;
+
+  const dayLabel = isToday ? 'сьогодні' : viewDate;
 
   const remaining = {
     kcal: c.targetCalories - totals.kcal,
@@ -989,7 +1005,7 @@ function renderMeals(){
   const remainingBlock = `
   <div class="card">
     <div class="row-flex">
-      <h2 style="margin:0;">Залишилось на сьогодні</h2>
+      <h2 style="margin:0;">Залишилось на ${dayLabel}</h2>
       <span class="small muted">з'їдено ${fmt(totals.kcal)} із ${fmt(c.targetCalories)} ккал</span>
     </div>
     <div class="stat-grid" style="margin-top:14px;">
@@ -998,7 +1014,7 @@ function renderMeals(){
       <div class="stat"><div class="label">Жири</div><div class="value ${remaining.fat>=0?'good':'bad'}">${remaining.fat>=0? fmt(remaining.fat,1)+' г' : signed(remaining.fat,1)+' г'}</div></div>
       <div class="stat"><div class="label">Вуглеводи</div><div class="value ${remaining.carbs>=0?'good':'bad'}">${remaining.carbs>=0? fmt(remaining.carbs,1)+' г' : signed(remaining.carbs,1)+' г'}</div></div>
     </div>
-    ${remaining.kcal<0? `<p class="hint" style="color:var(--bad); margin-top:10px;">Денну норму вже перевищено на ${fmt(Math.abs(remaining.kcal))} ккал.</p>` : `<p class="hint" style="margin-top:10px;">Стільки ще можна спожити сьогодні, щоб втриматись у нормі.</p>`}
+    ${remaining.kcal<0? `<p class="hint" style="color:var(--bad); margin-top:10px;">Денну норму вже перевищено на ${fmt(Math.abs(remaining.kcal))} ккал.</p>` : `<p class="hint" style="margin-top:10px;">Стільки ще можна спожити ${dayLabel==='сьогодні'?'сьогодні':'у цей день'}, щоб втриматись у нормі.</p>`}
   </div>`;
 
   const fittingRecipes = getFittingRecipes(remaining);
@@ -1025,7 +1041,7 @@ function renderMeals(){
   } else {
     const mealLabels = {breakfast:"сніданок", lunch:"обід", dinner:"вечеря"};
     const cards = fittingRecipes.map(r=>`
-      <div style="border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:10px; background:#FCFAF6;">
+      <div style="border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:10px; background:#FAF5FE;">
         <div class="row-flex">
           <b style="font-size:13.5px;">${r.name}</b>
           <span class="small muted">${r.kcal} ккал · Б${r.protein} Ж${r.fat} В${r.carbs}</span>
@@ -1062,7 +1078,7 @@ function renderMeals(){
     }).join('');
     planBlock = `
     <div class="card">
-      <h2>Меню на сьогодні за планом</h2>
+      <h2>Меню на ${isToday? 'сьогодні' : viewDate} за планом</h2>
       <p class="small">Познач, якщо ти дотрималась запропонованого рецепту — він додасться у фактичні дані нижче.</p>
       ${rows}
     </div>`;
@@ -1079,18 +1095,19 @@ function renderMeals(){
     </tr>`).join('');
 
   const myRecipesRows = myRecipes.map(r=>`
-    <div style="display:flex; justify-content:space-between; align-items:center; border:1px solid var(--line); border-radius:10px; padding:10px 14px; margin-top:8px; background:#FCFAF6;">
+    <div style="display:flex; justify-content:space-between; align-items:center; border:1px solid var(--line); border-radius:10px; padding:10px 14px; margin-top:8px; background:#FAF5FE;">
       <div>
         <b style="font-size:13.5px;">${r.name}</b>
         <div class="small muted">${fmt(r.kcal)} ккал · Б${fmt(r.protein,1)} Ж${fmt(r.fat,1)} В${fmt(r.carbs,1)}</div>
       </div>
       <div style="display:flex; gap:6px;">
-        <button class="ghost add-my-recipe-btn" data-id="${r.id}" style="margin:0; padding:6px 12px; font-size:12px;">Додати сьогодні</button>
+        <button class="ghost add-my-recipe-btn" data-id="${r.id}" style="margin:0; padding:6px 12px; font-size:12px;">Додати на ${isToday?'сьогодні':viewDate}</button>
         <button class="ghost delete-my-recipe-btn" data-id="${r.id}" style="margin:0; padding:6px 12px; font-size:12px;">Видалити</button>
       </div>
     </div>`).join('');
 
   return `
+  ${dateNav}
   ${remainingBlock}
   ${fittingBlock}
   ${planBlock}
@@ -1104,7 +1121,7 @@ function renderMeals(){
       </div>
       <div><label>Кількість (грам)</label><input type="number" id="food_grams" placeholder="напр. 150"></div>
     </div>
-    <button class="primary" id="addFoodBtn">Додати до сьогоднішнього прийому їжі</button>
+    <button class="primary" id="addFoodBtn">Додати на ${isToday?'сьогодні':viewDate}</button>
     <div id="foodError" class="hint" style="color:var(--bad);"></div>
   </div>
 
@@ -1124,7 +1141,7 @@ function renderMeals(){
       <input type="checkbox" id="custom_save_recipe" style="width:auto;">
       <span class="small" style="margin:0;">Зберегти як мій рецепт (щоб швидко додавати знову)</span>
     </label>
-    <button class="primary" id="addCustomBtn">Додати страву</button>
+    <button class="primary" id="addCustomBtn">Додати страву на ${isToday?'сьогодні':viewDate}</button>
     <div id="customError" class="hint" style="color:var(--bad);"></div>
   </div>
 
@@ -1137,7 +1154,7 @@ function renderMeals(){
 
   <div class="card">
     <div class="row-flex">
-      <h2 style="margin:0;">З'їдено сьогодні (${today})</h2>
+      <h2 style="margin:0;">З'їдено ${isToday?'сьогодні':'за '+viewDate}</h2>
       <span class="badge">${fmt(totals.kcal)} / ${fmt(c.targetCalories)} ккал</span>
     </div>
     ${entries.length===0? '<div class="empty">Ще нічого не додано</div>' : `
@@ -1151,7 +1168,20 @@ function renderMeals(){
 }
 
 function attachMealsHandlers(){
-  const today = todayISO();
+  const viewDate = selectedMealDate;
+
+  const mealDatePicker = document.getElementById('mealDatePicker');
+  if(mealDatePicker){
+    mealDatePicker.onchange = ()=>{
+      const val = mealDatePicker.value;
+      if(val){ selectedMealDate = val; render(); }
+    };
+  }
+  const mealDateTodayBtn = document.getElementById('mealDateTodayBtn');
+  if(mealDateTodayBtn){
+    mealDateTodayBtn.onclick = ()=>{ selectedMealDate = todayISO(); render(); };
+  }
+
   const addBtn = document.getElementById('addFoodBtn');
   if(addBtn){
     addBtn.onclick = async ()=>{
@@ -1180,18 +1210,18 @@ function attachMealsHandlers(){
       };
       addBtn.disabled = true; addBtn.textContent = 'Додаю…';
       try{
-        await addFoodEntry(today, entry);
+        await addFoodEntry(viewDate, entry);
         render();
       }catch(e){
         errEl.textContent = 'Не вдалося додати запис.';
-        addBtn.disabled = false; addBtn.textContent = 'Додати до сьогоднішнього прийому їжі';
+        addBtn.disabled = false; addBtn.textContent = 'Додати';
       }
     };
   }
 
   document.querySelectorAll('.remove-food-btn').forEach(btn=>{
     btn.onclick = async ()=>{
-      await removeFoodEntry(today, btn.dataset.id);
+      await removeFoodEntry(viewDate, btn.dataset.id);
       render();
     };
   });
@@ -1215,7 +1245,7 @@ function attachMealsHandlers(){
         source: 'custom'
       };
       try{
-        await addFoodEntry(today, entry);
+        await addFoodEntry(viewDate, entry);
         if(saveAsRecipe){
           const recipe = {id:'r_'+Date.now()+'_'+Math.round(Math.random()*10000), name, kcal:Math.round(kcal), protein, fat, carbs};
           myRecipes.push(recipe);
@@ -1233,7 +1263,7 @@ function attachMealsHandlers(){
     btn.onclick = async ()=>{
       const recipe = myRecipes.find(r=>r.id===btn.dataset.id);
       if(!recipe) return;
-      await addFoodEntry(today, {
+      await addFoodEntry(viewDate, {
         id: 'c_'+Date.now()+'_'+Math.round(Math.random()*10000),
         name: recipe.name, grams:null,
         kcal: recipe.kcal, protein: recipe.protein, fat: recipe.fat, carbs: recipe.carbs,
@@ -1255,12 +1285,12 @@ function attachMealsHandlers(){
     cb.onchange = async ()=>{
       const key = cb.dataset.key;
       const recipeId = cb.dataset.recipeid;
-      const plan = tomorrowPlans[today];
+      const plan = tomorrowPlans[viewDate];
       if(!plan || !plan[key]) return;
       if(cb.checked){
         const m = plan[key];
         const mealLabels = {breakfast:"Сніданок за рецептом", lunch:"Обід за рецептом", dinner:"Вечеря за рецептом"};
-        await addFoodEntry(today, {
+        await addFoodEntry(viewDate, {
           id: recipeId,
           name: (mealLabels[key]||'')+': '+(m.name||''),
           grams: null,
@@ -1268,7 +1298,7 @@ function attachMealsHandlers(){
           source: 'recipe:'+key
         });
       } else {
-        await removeFoodEntry(today, recipeId);
+        await removeFoodEntry(viewDate, recipeId);
       }
       render();
     };
@@ -1310,7 +1340,7 @@ function renderTomorrow(){
       if(!m) return '';
       const ingr = Array.isArray(m.ingredients) ? m.ingredients.join(', ') : '';
       return `
-      <div style="border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-top:12px; background:#FCFAF6;">
+      <div style="border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-top:12px; background:#FAF5FE;">
         <div class="row-flex">
           <b>${mealLabels[key]}: ${m.name||''}</b>
           <span class="small muted">${fmt(m.kcal)} ккал · Б${fmt(m.protein)} Ж${fmt(m.fat)} В${fmt(m.carbs)}</span>
@@ -1338,6 +1368,20 @@ function renderTomorrow(){
     </div>`;
   }
 
+  const allCatalogItems = Object.values(PANTRY_CATALOG).flat();
+  const customItems = pantrySelected.filter(item => !allCatalogItems.includes(item));
+  const customItemsBlock = customItems.length>0 ? `
+    <div style="margin-bottom:14px;">
+      <h3>Свої продукти</h3>
+      <div style="display:flex; flex-wrap:wrap; gap:8px;">
+        ${customItems.map(item=>`
+          <span style="display:inline-flex; align-items:center; gap:6px; background:#FAF5FE; border:1px solid var(--line); border-radius:999px; padding:5px 10px 5px 12px; font-size:13px;">
+            ${item}
+            <button class="ghost remove-custom-pantry-btn" data-item="${item}" style="margin:0; padding:0 4px; font-size:13px; border:none; line-height:1; color:var(--bad);">×</button>
+          </span>`).join('')}
+      </div>
+    </div>` : '';
+
   return `
   ${planBlock}
   <div class="card">
@@ -1346,6 +1390,11 @@ function renderTomorrow(){
       <span class="small muted">${pantrySelected.length} обрано</span>
     </div>
     <p class="small">Познач продукти, які зазвичай є в тебе вдома. Список збережеться і використовуватиметься для складання меню.</p>
+    <div class="grid2" style="align-items:end; margin-bottom:14px;">
+      <div><label>Немає в списку? Додай свій продукт</label><input type="text" id="customPantryInput" placeholder="напр. кус-кус"></div>
+      <div><button class="primary" id="addCustomPantryBtn" style="margin-top:0;">Додати продукт</button></div>
+    </div>
+    ${customItemsBlock}
     <div style="max-height:420px; overflow-y:auto; padding-right:6px;">
       ${categories}
     </div>
@@ -1356,11 +1405,34 @@ function renderTomorrow(){
 }
 
 function attachTomorrowHandlers(){
+  const addCustomPantryBtn = document.getElementById('addCustomPantryBtn');
+  if(addCustomPantryBtn){
+    addCustomPantryBtn.onclick = async ()=>{
+      const input = document.getElementById('customPantryInput');
+      const name = input.value.trim();
+      if(!name) return;
+      if(!pantrySelected.includes(name)) pantrySelected = [...pantrySelected, name];
+      try{
+        await window.storage.set("pantry", JSON.stringify(pantrySelected));
+      }catch(e){}
+      render();
+    };
+  }
+  document.querySelectorAll('.remove-custom-pantry-btn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      pantrySelected = pantrySelected.filter(item=>item!==btn.dataset.item);
+      try{
+        await window.storage.set("pantry", JSON.stringify(pantrySelected));
+      }catch(e){}
+      render();
+    };
+  });
   const savePantryBtn = document.getElementById('savePantryBtn');
   if(savePantryBtn){
     savePantryBtn.onclick = async ()=>{
       const checks = document.querySelectorAll('.pantry-check');
-      const selected = [...checks].filter(c=>c.checked).map(c=>c.dataset.item);
+      const checkedItems = [...checks].filter(c=>c.checked).map(c=>c.dataset.item);
+      const selected = [...checkedItems, ...customItems]; // keep custom items alongside checked catalog ones
       try{
         await window.storage.set("pantry", JSON.stringify(selected));
         pantrySelected = selected;
