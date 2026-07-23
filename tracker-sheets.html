@@ -158,6 +158,12 @@ window.storage = {
     if(!res.ok) throw new Error('bad response');
     return await res.json();
   },
+  async dump(){
+    if(!apiUrl) throw new Error('not configured');
+    const res = await fetch(apiUrl + (apiUrl.includes('?')?'&':'?') + 'action=dump');
+    if(!res.ok) throw new Error('bad response');
+    return await res.json(); // {items:[{key,value},...]}
+  },
   async delete(key){
     if(!apiUrl) throw new Error('not configured');
     const res = await fetch(apiUrl, {
@@ -209,69 +215,33 @@ let currentTab = 'dashboard';
 let selectedMealDate = todayISO(); // which day the "Їжа" tab is currently editing
 
 async function loadAll(){
-  try{
-    const s = await window.storage.get(KEY_SETUP);
-    setup = s ? JSON.parse(s.value) : null;
-  }catch(e){ setup = null; }
-
+  setup = null;
   dailyEntries = {};
   measureEntries = {};
   pantrySelected = [];
   tomorrowPlans = {};
   foodEntries = {};
   myRecipes = [];
+
+  let items = [];
   try{
-    const list = await window.storage.list("daily:");
-    if(list && list.keys){
-      for(const k of list.keys){
-        try{
-          const r = await window.storage.get(k);
-          if(r) dailyEntries[k.replace("daily:","")] = JSON.parse(r.value);
-        }catch(e){}
-      }
-    }
-  }catch(e){}
-  try{
-    const list = await window.storage.list("measure:");
-    if(list && list.keys){
-      for(const k of list.keys){
-        try{
-          const r = await window.storage.get(k);
-          if(r) measureEntries[k.replace("measure:","")] = JSON.parse(r.value);
-        }catch(e){}
-      }
-    }
-  }catch(e){}
-  try{
-    const r = await window.storage.get("pantry");
-    if(r) pantrySelected = JSON.parse(r.value);
-  }catch(e){}
-  try{
-    const r = await window.storage.get("myRecipes");
-    if(r) myRecipes = JSON.parse(r.value);
-  }catch(e){}
-  try{
-    const list = await window.storage.list("tomorrowPlan:");
-    if(list && list.keys){
-      for(const k of list.keys){
-        try{
-          const r = await window.storage.get(k);
-          if(r) tomorrowPlans[k.replace("tomorrowPlan:","")] = JSON.parse(r.value);
-        }catch(e){}
-      }
-    }
-  }catch(e){}
-  try{
-    const list = await window.storage.list("food:");
-    if(list && list.keys){
-      for(const k of list.keys){
-        try{
-          const r = await window.storage.get(k);
-          if(r) foodEntries[k.replace("food:","")] = JSON.parse(r.value);
-        }catch(e){}
-      }
-    }
-  }catch(e){}
+    const res = await window.storage.dump();
+    items = (res && res.items) ? res.items : [];
+  }catch(e){
+    return; // leave everything at defaults; render() will show the error/empty state
+  }
+
+  for(const {key, value} of items){
+    try{
+      if(key === KEY_SETUP){ setup = JSON.parse(value); }
+      else if(key === "pantry"){ pantrySelected = JSON.parse(value); }
+      else if(key === "myRecipes"){ myRecipes = JSON.parse(value); }
+      else if(key.startsWith("daily:")){ dailyEntries[key.slice(6)] = JSON.parse(value); }
+      else if(key.startsWith("measure:")){ measureEntries[key.slice(8)] = JSON.parse(value); }
+      else if(key.startsWith("tomorrowPlan:")){ tomorrowPlans[key.slice(13)] = JSON.parse(value); }
+      else if(key.startsWith("food:")){ foodEntries[key.slice(5)] = JSON.parse(value); }
+    }catch(e){ /* skip a malformed row rather than failing the whole load */ }
+  }
 }
 
 function calc(){
