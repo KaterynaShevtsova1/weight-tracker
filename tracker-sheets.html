@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="uk">
 <head>
@@ -1515,7 +1516,8 @@ function renderTable(){
   const dates = sortedDates(dailyEntries);
   let cumEaten = 0;
   const rows = [];
-  for(const d of dates){
+  for(let i=0;i<dates.length;i++){
+    const d = dates[i];
     const e = dailyEntries[d];
     const dayNum = daysBetween(setup.startDate, d) + 1;
     cumEaten += e.calories;
@@ -1523,8 +1525,29 @@ function renderTable(){
     const diff = cumEaten - cumExpended;
     const actualChangeG = (e.weight - setup.startWeight)*1000;
     const normChangeG = -(c.weeklyLossG/7)*dayNum;
-    rows.push({d, dayNum, cumEaten, cumExpended, diff, actualChangeG, normChangeG});
+
+    // Day-over-day check: did that day's calorie deficit line up with the weight move vs the previous entry?
+    const dailyDeficit = c.tdee - e.calories; // positive = ate less than burned that day
+    let weightChangeVsPrev = null;
+    let correlates = null;
+    if(i>0){
+      const prevE = dailyEntries[dates[i-1]];
+      if(prevE.weight!=null && e.weight!=null && !isNaN(prevE.weight) && !isNaN(e.weight)){
+        weightChangeVsPrev = (e.weight - prevE.weight)*1000;
+        const deficitSide = dailyDeficit>0; // true = деficit, false = профіцит/рівно
+        const weightSide = weightChangeVsPrev<=0; // true = схудла/без змін, false = набрала
+        correlates = deficitSide === weightSide;
+      }
+    }
+    rows.push({d, dayNum, cumEaten, cumExpended, diff, actualChangeG, normChangeG, dailyDeficit, weightChangeVsPrev, correlates});
   }
+
+  const correlationCell = r => {
+    if(r.correlates===null) return `<td class="muted">—</td>`;
+    return r.correlates
+      ? `<td class="pos">✓ збігається</td>`
+      : `<td class="neg">✗ не збігається</td>`;
+  };
 
   const dailyRows = rows.slice().reverse().map(r=>`
     <tr>
@@ -1534,7 +1557,16 @@ function renderTable(){
       <td class="${r.diff<=0?'pos':'neg'}">${signed(r.diff)}</td>
       <td class="${r.actualChangeG<=0?'pos':'neg'}">${signed(r.actualChangeG)} г</td>
       <td class="muted">${signed(r.normChangeG)} г</td>
+      ${correlationCell(r)}
     </tr>`).join('');
+
+  const validCorrelationRows = rows.filter(r=>r.correlates!==null);
+  const matchCount = validCorrelationRows.filter(r=>r.correlates).length;
+  const correlationPct = validCorrelationRows.length>0 ? Math.round((matchCount/validCorrelationRows.length)*100) : null;
+  const correlationSummary = correlationPct!==null ? `
+    <p class="small" style="margin-top:10px;">
+      За ${validCorrelationRows.length} ${validCorrelationRows.length===1?'день з порівнянням':'днів з порівнянням'} дефіцит калорій і напрямок зміни ваги збігались у <b>${matchCount}</b> (${correlationPct}%). Одноденні розбіжності — це нормально (вода, сіль, цикл, стрес); дивись радше на тижневий тренд, ніж на щоденні коливання.
+    </p>` : `<p class="small" style="margin-top:10px;">Потрібно принаймні два дні поспіль із зваженням, щоб порахувати кореляцію.</p>`;
 
   // Weekly summary: group by ISO week number from start date
   const weeks = {};
@@ -1587,9 +1619,11 @@ function renderTable(){
         <th>Різниця (дефіцит/профіцит)</th>
         <th>Зміна ваги з початку</th>
         <th>Норма зміни на цей день</th>
+        <th>Дефіцит ↔ вага (до вчора)</th>
       </tr></thead>
       <tbody>${dailyRows}</tbody>
-    </table></div>`}
+    </table></div>
+    ${correlationSummary}`}
   </div>
 
   <div class="card">
