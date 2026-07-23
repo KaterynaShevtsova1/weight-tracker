@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="uk">
 <head>
@@ -133,9 +132,6 @@ const LS_URL_KEY = "tracker_apps_script_url";
 let apiUrl = localStorage.getItem(LS_URL_KEY) || '';
 let connectionStatus = apiUrl ? 'unknown' : 'not_configured';
 
-// Shim that makes window.storage talk to a Google Apps Script web app
-// (deployed from AppsScript_Code.gs) instead of Claude's built-in storage.
-// Same method signatures (get/set/list/delete) as the real window.storage API.
 window.storage = {
   async get(key){
     if(!apiUrl) throw new Error('not configured');
@@ -143,7 +139,7 @@ window.storage = {
     if(!res.ok) throw new Error('bad response');
     const data = await res.json();
     if(data === null) throw new Error('not found');
-    return data; // {key, value}
+    return data;
   },
   async set(key, value){
     if(!apiUrl) throw new Error('not configured');
@@ -159,7 +155,7 @@ window.storage = {
     if(!apiUrl) throw new Error('not configured');
     const res = await fetch(apiUrl + (apiUrl.includes('?')?'&':'?') + 'action=list&prefix=' + encodeURIComponent(prefix||''));
     if(!res.ok) throw new Error('bad response');
-    return await res.json(); // {keys:[...]}
+    return await res.json();
   },
   async delete(key){
     if(!apiUrl) throw new Error('not configured');
@@ -344,11 +340,8 @@ function render(){
     </div>`;
     document.getElementById('retryBtn').onclick = async ()=>{
       loading=true; render();
-      try{
-        await window.storage.list('');
-        connectionStatus='ok';
-        await loadAll();
-      }catch(e){ connectionStatus='err'; }
+      try{ await window.storage.list(''); connectionStatus='ok'; await loadAll(); }
+      catch(e){ connectionStatus='err'; }
       loading=false; render();
     };
     document.getElementById('changeUrlBtn').onclick = ()=>{ apiUrl=''; localStorage.removeItem(LS_URL_KEY); render(); };
@@ -412,13 +405,8 @@ function attachConnectionHandlers(){
     localStorage.setItem(LS_URL_KEY, url);
     loading = true;
     render();
-    try{
-      await window.storage.list('');
-      connectionStatus = 'ok';
-      await loadAll();
-    }catch(e){
-      connectionStatus = 'err';
-    }
+    try{ await window.storage.list(''); connectionStatus = 'ok'; await loadAll(); }
+    catch(e){ connectionStatus = 'err'; }
     loading = false;
     currentTab = 'dashboard';
     render();
@@ -513,6 +501,56 @@ function attachSetupHandlers(first){
 }
 
 // ---------- DASHBOARD ----------
+function renderWeightChartSVG(dates, entries){
+  const points = dates.map(d=>({date:d, weight:entries[d].weight})).filter(p=>p.weight!=null && !isNaN(p.weight));
+  if(points.length<2) return null;
+
+  const width=680, height=220;
+  const marginLeft=52, marginRight=16, marginTop=16, marginBottom=28;
+  const plotW = width-marginLeft-marginRight;
+  const plotH = height-marginTop-marginBottom;
+
+  const weights = points.map(p=>p.weight);
+  const minW = Math.min(...weights), maxW = Math.max(...weights);
+  const pad = Math.max(0.4, (maxW-minW)*0.2) || 1;
+  const yMin = minW-pad, yMax = maxW+pad;
+
+  const xStep = points.length>1 ? plotW/(points.length-1) : 0;
+  const xPos = i => marginLeft + i*xStep;
+  const yPos = w => marginTop + (yMax-w)/((yMax-yMin)||1)*plotH;
+
+  const pathD = points.map((p,i)=> (i===0?'M':'L') + xPos(i).toFixed(1) + ' ' + yPos(p.weight).toFixed(1)).join(' ');
+
+  const ticks = 4;
+  let gridLines = '', yLabels = '';
+  for(let i=0;i<=ticks;i++){
+    const val = yMin + (yMax-yMin)*i/ticks;
+    const y = yPos(val);
+    gridLines += `<line x1="${marginLeft}" y1="${y.toFixed(1)}" x2="${width-marginRight}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`;
+    yLabels += `<text x="${marginLeft-8}" y="${(y+4).toFixed(1)}" text-anchor="end" font-size="11" fill="var(--ink-soft)" font-family="Inter, sans-serif">${val.toFixed(1)} кг</text>`;
+  }
+
+  let xLabels = '';
+  const labelIdxs = points.length<=4 ? points.map((_,i)=>i) : [0, Math.floor((points.length-1)/2), points.length-1];
+  labelIdxs.forEach(i=>{
+    const d = points[i].date.slice(5); // MM-DD
+    xLabels += `<text x="${xPos(i).toFixed(1)}" y="${height-8}" text-anchor="middle" font-size="11" fill="var(--ink-soft)" font-family="Inter, sans-serif">${d}</text>`;
+  });
+
+  let dots = '';
+  points.forEach((p,i)=>{
+    dots += `<circle cx="${xPos(i).toFixed(1)}" cy="${yPos(p.weight).toFixed(1)}" r="3.5" fill="var(--teal)"/>`;
+  });
+
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" style="display:block;">
+    ${gridLines}
+    ${yLabels}
+    <path d="${pathD}" fill="none" stroke="var(--teal)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+    ${dots}
+    ${xLabels}
+  </svg>`;
+}
+
 function renderDashboard(){
   const c = calc();
   const dates = sortedDates(dailyEntries);
@@ -592,6 +630,16 @@ function renderDashboard(){
   </div>
 
   <div class="card">
+    <h2>Динаміка ваги</h2>
+    ${dates.length>0 ? `
+    <div class="stat" style="max-width:280px; margin-bottom:14px;">
+      <div class="label">Змінилось з початку</div>
+      <div class="value ${(latestWeight-setup.startWeight)<=0?'good':'bad'}">${signed((latestWeight-setup.startWeight)*1000)} г (${signed(latestWeight-setup.startWeight,1)} кг)</div>
+    </div>` : ''}
+    ${renderWeightChartSVG(dates, dailyEntries) || '<div class="empty">Потрібно щонайменше 2 записи ваги, щоб побудувати графік</div>'}
+  </div>
+
+  <div class="card">
     <h2>Прогрес до цілі</h2>
     <div class="ring-wrap">
       <svg width="120" height="120" viewBox="0 0 120 120">
@@ -651,17 +699,9 @@ function renderDaily(){
   <div class="card">
     <h2>Запис за сьогодні (${today})</h2>
     <p class="small">Ідеальне КБЖУ на день: ${fmt(c.targetCalories)} ккал · Б ${fmt(c.proteinG)} г · Ж ${fmt(c.fatG)} г · В ${fmt(c.carbsG)} г</p>
-    <div class="grid2">
-      <div><label>Моя вага (кг)</label><input type="number" step="0.1" id="d_weight" value="${existing.weight ?? ''}"></div>
-      <div>
-        <label>З'їдено сьогодні (з розділу «Їжа»)</label>
-        <div class="stat" style="margin-top:0;">
-          <div class="value" style="font-size:16px;">${fmt(todayTotals.kcal)} ккал · Б${fmt(todayTotals.protein,1)} Ж${fmt(todayTotals.fat,1)} В${fmt(todayTotals.carbs,1)}</div>
-        </div>
-      </div>
-    </div>
+    <label>Моя вага (кг)</label><input type="number" step="0.1" id="d_weight" value="${existing.weight ?? ''}">
     <button class="primary" id="saveDailyBtn">Зберегти вагу</button>
-    <p class="hint">Калорії й КБЖУ вносяться окремо у вкладці «Їжа» — додай туди продукти, і цифри тут оновляться автоматично.</p>
+    <p class="hint">Калорії й КБЖУ вносяться окремо у вкладці «Їжа».</p>
     <div id="dailyError" class="hint" style="color:var(--bad);"></div>
   </div>
 
@@ -785,6 +825,12 @@ const RECIPES = {
      desc:"2 яйця + 1 білок, збити, підсмажити на краплі олії з жменею шпинату і помідорами чері. Скибка цільнозернового хліба окремо."},
     {name:"Сирна запіканка (творог) з бананом", kcal:310, protein:27, fat:8, carbs:36,
      desc:"200 г нежирного сиру (5%) + 1 яйце + пів банана, розім'яти й запекти 20 хв при 180°C, або їсти сирим як сирну масу."},
+    {name:"Вівсянка на молоці з горіхами й корицею", kcal:340, protein:18, fat:11, carbs:44,
+     desc:"50 г вівсяних пластівців зварити на знежиреному молоці, додати столову ложку подрібнених волоських горіхів і щіпку кориці."},
+    {name:"Тост з авокадо і яйцем пашот", kcal:350, protein:18, fat:19, carbs:28,
+     desc:"Скибка цільнозернового хліба, половина авокадо розім'ята зверху, яйце пашот, чорний перець і трохи лимонного соку."},
+    {name:"Протеїновий смузі з бananом і шпинатом", kcal:300, protein:25, fat:6, carbs:38,
+     desc:"Банан + жменя шпинату + мірна ложка протеїнового порошку + 200 мл кефіру — збити блендером до однорідності."},
   ],
   lunch: [
     {name:"Куряче філе з гречкою й овочами", kcal:520, protein:42, fat:14, carbs:56,
@@ -793,6 +839,12 @@ const RECIPES = {
      desc:"120 г лосося запекти 15 хв + 150 г запеченого бататy + броколі на парі, скропити лимонним соком."},
     {name:"Салат з тунцем, квасолею і яйцем", kcal:500, protein:40, fat:18, carbs:42,
      desc:"Банка тунця у власному соку + варена квасоля + варене яйце + мікс салату, заправка — йогурт з гірчицею."},
+    {name:"Індичка з булгуром і овочевим салатом", kcal:510, protein:40, fat:16, carbs:50,
+     desc:"150 г філе індички на грилі + 150 г вареного булгуру + салат з огірків і редиски під оливковою олією."},
+    {name:"Курка каррі з нутом", kcal:530, protein:36, fat:18, carbs:54,
+     desc:"120 г курячого філе тушкувати з нутом, цибулею, помідорами і карі; подавати з невеликою порцією рису."},
+    {name:"Легкий салат Цезар з куркою", kcal:480, protein:40, fat:20, carbs:30,
+     desc:"Куряче філе на грилі + листя ромену + трохи пармезану, заправка з йогурту та гірчиці замість майонезу."},
   ],
   dinner: [
     {name:"Індичка з овочами на пару", kcal:430, protein:36, fat:14, carbs:34,
@@ -801,6 +853,12 @@ const RECIPES = {
      desc:"120 г курки або тофу + мікс овочів (перець, броколі, морква) швидко обсмажені на маленькій кількості олії + соєвий соус."},
     {name:"Запечена риба з овочевим рагу", kcal:400, protein:32, fat:12, carbs:38,
      desc:"150 г білої риби (тріска, минтай) запечена + рагу з кабачків, баклажанів і помідорів, трохи оливкової олії."},
+    {name:"Овочевий омлет на вечерю", kcal:420, protein:28, fat:22, carbs:20,
+     desc:"2 яйця + 1 білок з болгарським перцем, цибулею і шпинатом; подавати зі скибкою цільнозернового хліба."},
+    {name:"Крем-суп з броколі і куркою", kcal:410, protein:34, fat:14, carbs:36,
+     desc:"Броколі, картопля і цибуля зварені й збиті блендером до кремової консистенції; подавати зі шматочками вареної курки."},
+    {name:"Салат з тунцем і кіноа", kcal:440, protein:36, fat:16, carbs:38,
+     desc:"Тунець консервований + варена кіноа + огірки, помідори і зелень, заправка з лимонного соку й оливкової олії."},
   ]
 };
 
@@ -1112,20 +1170,6 @@ function renderMeals(){
   ${fittingBlock}
   ${planBlock}
   <div class="card">
-    <h2>Додати продукт</h2>
-    <div class="grid2">
-      <div>
-        <label>Продукт</label>
-        <input type="text" id="food_name" list="foodList" placeholder="Почни вводити назву…">
-        <datalist id="foodList">${productOptions}</datalist>
-      </div>
-      <div><label>Кількість (грам)</label><input type="number" id="food_grams" placeholder="напр. 150"></div>
-    </div>
-    <button class="primary" id="addFoodBtn">Додати на ${isToday?'сьогодні':viewDate}</button>
-    <div id="foodError" class="hint" style="color:var(--bad);"></div>
-  </div>
-
-  <div class="card">
     <h2>Своя страва — внести КБЖУ вручну</h2>
     <p class="small">Якщо страви немає в базі продуктів — впиши назву і своє КБЖУ напряму (наприклад, з упаковки або з іншого джерела).</p>
     <div class="grid2">
@@ -1180,43 +1224,6 @@ function attachMealsHandlers(){
   const mealDateTodayBtn = document.getElementById('mealDateTodayBtn');
   if(mealDateTodayBtn){
     mealDateTodayBtn.onclick = ()=>{ selectedMealDate = todayISO(); render(); };
-  }
-
-  const addBtn = document.getElementById('addFoodBtn');
-  if(addBtn){
-    addBtn.onclick = async ()=>{
-      const nameInput = document.getElementById('food_name').value.trim();
-      const grams = parseFloat(document.getElementById('food_grams').value);
-      const errEl = document.getElementById('foodError');
-      const food = FOOD_DB[nameInput];
-      if(!food){
-        errEl.textContent = 'Обери продукт зі списку (почни вводити назву — з\'являться підказки).';
-        return;
-      }
-      if(!grams || grams<=0){
-        errEl.textContent = 'Вкажи кількість у грамах.';
-        return;
-      }
-      const factor = grams/100;
-      const entry = {
-        id: 'f_'+Date.now()+'_'+Math.round(Math.random()*10000),
-        name: nameInput,
-        grams,
-        kcal: Math.round(food.kcal*factor),
-        protein: Math.round(food.protein*factor*10)/10,
-        fat: Math.round(food.fat*factor*10)/10,
-        carbs: Math.round(food.carbs*factor*10)/10,
-        source: 'manual'
-      };
-      addBtn.disabled = true; addBtn.textContent = 'Додаю…';
-      try{
-        await addFoodEntry(viewDate, entry);
-        render();
-      }catch(e){
-        errEl.textContent = 'Не вдалося додати запис.';
-        addBtn.disabled = false; addBtn.textContent = 'Додати';
-      }
-    };
   }
 
   document.querySelectorAll('.remove-food-btn').forEach(btn=>{
@@ -1513,7 +1520,7 @@ function renderTable(){
     const dayNum = daysBetween(setup.startDate, d) + 1;
     cumEaten += e.calories;
     const cumExpended = c.tdee * dayNum;
-    const diff = cumExpended - cumEaten;
+    const diff = cumEaten - cumExpended;
     const actualChangeG = (e.weight - setup.startWeight)*1000;
     const normChangeG = -(c.weeklyLossG/7)*dayNum;
     rows.push({d, dayNum, cumEaten, cumExpended, diff, actualChangeG, normChangeG});
@@ -1524,7 +1531,7 @@ function renderTable(){
       <td>${r.d} <span class="muted">(день ${r.dayNum})</span></td>
       <td>${fmt(r.cumEaten)}</td>
       <td>${fmt(r.cumExpended)}</td>
-      <td class="${r.diff>=0?'pos':'neg'}">${signed(r.diff)}</td>
+      <td class="${r.diff<=0?'pos':'neg'}">${signed(r.diff)}</td>
       <td class="${r.actualChangeG<=0?'pos':'neg'}">${signed(r.actualChangeG)} г</td>
       <td class="muted">${signed(r.normChangeG)} г</td>
     </tr>`).join('');
@@ -1610,13 +1617,8 @@ function renderTable(){
   if(apiUrl){
     loading = true;
     render();
-    try{
-      await window.storage.list('');
-      connectionStatus = 'ok';
-      await loadAll();
-    }catch(e){
-      connectionStatus = 'err';
-    }
+    try{ await window.storage.list(''); connectionStatus = 'ok'; await loadAll(); }
+    catch(e){ connectionStatus = 'err'; }
     loading = false;
   }
   render();
