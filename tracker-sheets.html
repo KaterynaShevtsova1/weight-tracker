@@ -191,6 +191,17 @@ const MOTIVATION = [
   "Сьогоднішній запис — це турбота, а не контроль.",
 ];
 
+const ALCOHOL_FACTS = [
+  "Алкоголь дає близько 7 ккал на грам — майже стільки ж, скільки жир (9 ккал/г), і при цьому не містить жодних поживних речовин. Це так звані «порожні калорії».",
+  "Поки печінка розщеплює алкоголь, вона майже повністю призупиняє спалювання жиру — організм у цей час пріоритетно позбувається спирту, а не жирових запасів. Це може тривати кілька годин після навіть однієї порції.",
+  "Один келих вина (150 мл) — це приблизно 125-150 ккал, келих пива (500 мл) — 200-230 ккал. Три келихи за вечір можуть додати стільки ж калорій, скільки повноцінний прийом їжі.",
+  "Алкоголь знижує якість сну навіть тоді, коли здається, що допомагає заснути швидше — це порушує гормональний баланс (кортизол, грелін, лептин), який відповідає за апетит наступного дня.",
+  "Дослідження стабільно показують: алкоголь послаблює самоконтроль щодо їжі — після випитого людина в середньому з'їдає більше калорій за вечір, ніж планувала.",
+  "Регулярне вживання алкоголю пов'язане зі збільшенням саме вісцерального (навколо органів) жиру — того типу, який найбільше впливає на метаболічне здоров'я.",
+  "Навіть помірне вживання алкоголю підвищує навантаження на печінку та артеріальний тиск, а Всесвітня організація охорони здоров'я не визначає жодної «безпечної» дози щодо ризику для здоров'я.",
+  "День без алкоголю — це не лише про калорії. Це кращий сон, стабільніший настрій вранці і менше спонтанних рішень щодо їжі наступного дня.",
+];
+
 function todayISO(d=new Date()){ return d.toISOString().slice(0,10); }
 function fmt(n, digits=0){ if(n===null||n===undefined||isNaN(n)) return "—"; return n.toLocaleString('uk-UA',{maximumFractionDigits:digits, minimumFractionDigits:digits}); }
 function signed(n, digits=0){ if(n===null||n===undefined||isNaN(n)) return "—"; const s = n>0?"+":""; return s+fmt(n,digits); }
@@ -211,6 +222,7 @@ let pantrySelected = []; // array of product names user has
 let tomorrowPlans = {};  // date -> {breakfast,lunch,dinner}
 let foodEntries = {};    // date -> array of {id,name,grams,kcal,protein,fat,carbs,source}
 let myRecipes = [];      // array of {id,name,kcal,protein,fat,carbs} saved custom dishes
+let alcoholEntries = {}; // date -> 'none' | 'had'
 let currentTab = 'dashboard';
 let selectedMealDate = todayISO(); // which day the "Їжа" tab is currently editing
 let selectedWeightDate = todayISO(); // which day the "Щоденник" tab is currently editing
@@ -223,6 +235,7 @@ async function loadAll(){
   tomorrowPlans = {};
   foodEntries = {};
   myRecipes = [];
+  alcoholEntries = {};
 
   let items = [];
   try{
@@ -241,6 +254,7 @@ async function loadAll(){
       else if(key.startsWith("measure:")){ measureEntries[key.slice(8)] = JSON.parse(value); }
       else if(key.startsWith("tomorrowPlan:")){ tomorrowPlans[key.slice(13)] = JSON.parse(value); }
       else if(key.startsWith("food:")){ foodEntries[key.slice(5)] = JSON.parse(value); }
+      else if(key.startsWith("alcohol:")){ alcoholEntries[key.slice(8)] = JSON.parse(value); }
     }catch(e){ /* skip a malformed row rather than failing the whole load */ }
   }
 }
@@ -630,6 +644,29 @@ function renderDashboard(){
     </div>
   </div>
 
+  ${(()=>{
+    const alcDates = Object.keys(alcoholEntries);
+    const trackedCount = alcDates.length;
+    const noneCount = alcDates.filter(d=>alcoholEntries[d]==='none').length;
+    const hadCount = alcDates.filter(d=>alcoholEntries[d]==='had').length;
+    const pct = trackedCount>0 ? Math.round((noneCount/trackedCount)*100) : null;
+    const fact = ALCOHOL_FACTS[daysElapsed % ALCOHOL_FACTS.length];
+    return `
+    <div class="card">
+      <div class="row-flex">
+        <h2 style="margin:0;">Алкоголь</h2>
+        ${trackedCount>0? `<span class="badge">${noneCount} з ${trackedCount} днів без алкоголю</span>` : ''}
+      </div>
+      ${trackedCount>0 ? `
+      <div class="stat-grid" style="margin-top:14px;">
+        <div class="stat"><div class="label">Без алкоголю</div><div class="value good">${noneCount} ${daysWord(noneCount)}</div></div>
+        <div class="stat"><div class="label">Був алкоголь</div><div class="value ${hadCount>0?'bad':''}">${hadCount} ${daysWord(hadCount)}</div></div>
+        <div class="stat"><div class="label">Відсоток тверезих днів</div><div class="value ${pct>=70?'good':pct<40?'bad':''}">${pct}%</div></div>
+      </div>` : `<p class="small">Познач у вкладці «Щоденник», чи був алкоголь того чи іншого дня — можна відмітити і минулі дні.</p>`}
+      <p class="small" style="margin-top:14px; line-height:1.5;">${fact}</p>
+    </div>`;
+  })()}
+
   <div class="card">
     <h2>Мотивація дня</h2>
     <div class="quote">"${quote}"</div>
@@ -652,10 +689,13 @@ function renderDaily(){
   const existing = dailyEntries[viewDate] || {weight:''};
   const dates = sortedDates(dailyEntries).slice().reverse();
   const c = calc();
+  const currentAlcoholStatus = alcoholEntries[viewDate];
 
   const rows = dates.map(d=>{
     const e = dailyEntries[d];
     const dev = (e.calories||0) - c.targetCalories;
+    const alc = alcoholEntries[d];
+    const alcCell = alc==='none' ? '<span class="pos">без алкоголю</span>' : alc==='had' ? '<span class="neg">був алкоголь</span>' : '<span class="muted">—</span>';
     return `<tr>
       <td>${d}</td>
       <td>${fmt(e.weight,1)} кг</td>
@@ -664,6 +704,7 @@ function renderDaily(){
       <td>${e.fat!==undefined && e.fat!==null? fmt(e.fat)+' г':'—'}</td>
       <td>${e.carbs!==undefined && e.carbs!==null? fmt(e.carbs)+' г':'—'}</td>
       <td class="${dev<=0?'pos':'neg'}">${signed(dev)}</td>
+      <td>${alcCell}</td>
     </tr>`;
   }).join('');
 
@@ -685,10 +726,21 @@ function renderDaily(){
   </div>
 
   <div class="card">
+    <h2>Алкоголь за ${isToday?'сьогодні':viewDate}</h2>
+    <p class="small">Можна позначити будь-який день, включно з минулими — просто зміни дату вище.</p>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <button class="${currentAlcoholStatus==='none'?'primary':'ghost'}" id="alcNoneBtn" style="margin-top:0;">Без алкоголю</button>
+      <button class="${currentAlcoholStatus==='had'?'primary':'ghost'}" id="alcHadBtn" style="margin-top:0;">Був алкоголь</button>
+      ${currentAlcoholStatus? `<button class="ghost" id="alcClearBtn" style="margin-top:0;">Прибрати позначку</button>` : ''}
+    </div>
+    <div id="alcStatus" class="hint"></div>
+  </div>
+
+  <div class="card">
     <h2>Історія записів</h2>
     ${dates.length===0? '<div class="empty">Записів ще немає</div>' : `
     <div class="tablewrap"><table>
-      <thead><tr><th>Дата</th><th>Вага</th><th>Калорії</th><th>Білки</th><th>Жири</th><th>Вуглеводи</th><th>Відхилення від норми</th></tr></thead>
+      <thead><tr><th>Дата</th><th>Вага</th><th>Калорії</th><th>Білки</th><th>Жири</th><th>Вуглеводи</th><th>Відхилення від норми</th><th>Алкоголь</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`}
   </div>
@@ -726,6 +778,28 @@ function attachDailyHandlers(){
       document.getElementById('dailyError').textContent = 'Не вдалося зберегти запис.';
     }
   };
+
+  const setAlcohol = async (status)=>{
+    try{
+      if(status===null){
+        await window.storage.delete("alcohol:"+viewDate);
+        delete alcoholEntries[viewDate];
+      } else {
+        await window.storage.set("alcohol:"+viewDate, JSON.stringify(status));
+        alcoholEntries[viewDate] = status;
+      }
+      render();
+    }catch(e){
+      const el = document.getElementById('alcStatus');
+      if(el){ el.textContent = 'Не вдалося зберегти позначку.'; el.style.color = 'var(--bad)'; }
+    }
+  };
+  const alcNoneBtn = document.getElementById('alcNoneBtn');
+  if(alcNoneBtn) alcNoneBtn.onclick = ()=>setAlcohol('none');
+  const alcHadBtn = document.getElementById('alcHadBtn');
+  if(alcHadBtn) alcHadBtn.onclick = ()=>setAlcohol('had');
+  const alcClearBtn = document.getElementById('alcClearBtn');
+  if(alcClearBtn) alcClearBtn.onclick = ()=>setAlcohol(null);
 }
 
 // ---------- MEASUREMENTS ----------
@@ -1663,6 +1737,7 @@ function renderTable(){
     const diff = cumEaten - cumExpended;
     const actualChangeG = (e.weight - setup.startWeight)*1000;
     const normChangeG = -(c.weeklyLossG/7)*dayNum;
+    const expectedChangeFromCaloriesG = diff/7.7; // 7700 ккал ≈ 1 кг жиру; diff у ккал -> грами
 
     const dailyDeficit = c.tdee - e.calories; // positive = ate less than burned that day
     if(i>0){
@@ -1673,7 +1748,7 @@ function renderTable(){
         lossSeries.push(lossG);
       }
     }
-    rows.push({d, dayNum, cumEaten, cumExpended, diff, actualChangeG, normChangeG, cumProtein, cumFat, cumCarbs});
+    rows.push({d, dayNum, cumEaten, cumExpended, diff, actualChangeG, normChangeG, expectedChangeFromCaloriesG, cumProtein, cumFat, cumCarbs});
   }
 
   const dailyRows = rows.slice().reverse().map(r=>`
@@ -1684,6 +1759,7 @@ function renderTable(){
       <td class="${r.diff<=0?'pos':'neg'}">${signed(r.diff)}</td>
       <td class="${r.actualChangeG<=0?'pos':'neg'}">${signed(r.actualChangeG)} г</td>
       <td class="muted">${signed(r.normChangeG)} г</td>
+      <td class="muted">${signed(r.expectedChangeFromCaloriesG)} г</td>
     </tr>`).join('');
 
   const lastRow = rows[rows.length-1];
@@ -1781,6 +1857,7 @@ function renderTable(){
         <th>Різниця (дефіцит/профіцит)</th>
         <th>Зміна ваги з початку</th>
         <th>Норма зміни на цей день</th>
+        <th>Очікувана зміна з калорій</th>
       </tr></thead>
       <tbody>${dailyRows}</tbody>
     </table></div>`}
