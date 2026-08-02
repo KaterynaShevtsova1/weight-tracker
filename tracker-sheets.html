@@ -213,6 +213,7 @@ let foodEntries = {};    // date -> array of {id,name,grams,kcal,protein,fat,car
 let myRecipes = [];      // array of {id,name,kcal,protein,fat,carbs} saved custom dishes
 let currentTab = 'dashboard';
 let selectedMealDate = todayISO(); // which day the "Їжа" tab is currently editing
+let selectedWeightDate = todayISO(); // which day the "Щоденник" tab is currently editing
 
 async function loadAll(){
   setup = null;
@@ -646,11 +647,11 @@ function daysWord(n){
 
 // ---------- DAILY ----------
 function renderDaily(){
-  const today = todayISO();
-  const existing = dailyEntries[today] || {weight:''};
+  const viewDate = selectedWeightDate;
+  const isToday = viewDate === todayISO();
+  const existing = dailyEntries[viewDate] || {weight:''};
   const dates = sortedDates(dailyEntries).slice().reverse();
   const c = calc();
-  const todayTotals = getDayMacroTotals(today);
 
   const rows = dates.map(d=>{
     const e = dailyEntries[d];
@@ -668,9 +669,16 @@ function renderDaily(){
 
   return `
   <div class="card">
-    <h2>Запис за сьогодні (${today})</h2>
+    <div class="row-flex">
+      <h2 style="margin:0;">Запис ваги</h2>
+      <span class="small muted">${isToday? 'Сьогодні' : 'Заднім числом'}</span>
+    </div>
     <p class="small">Ідеальне КБЖУ на день: ${fmt(c.targetCalories)} ккал · Б ${fmt(c.proteinG)} г · Ж ${fmt(c.fatG)} г · В ${fmt(c.carbsG)} г</p>
-    <label>Моя вага (кг)</label><input type="number" step="0.1" id="d_weight" value="${existing.weight ?? ''}">
+    <div class="grid2" style="align-items:end;">
+      <div><label>Дата</label><input type="date" id="weightDatePicker" value="${viewDate}" max="${todayISO()}"></div>
+      <div><button class="ghost" id="weightDateTodayBtn" style="margin-top:0;">Повернутись до сьогодні</button></div>
+    </div>
+    <label>Вага за ${isToday?'сьогодні':viewDate} (кг)</label><input type="number" step="0.1" id="d_weight" value="${existing.weight ?? ''}">
     <button class="primary" id="saveDailyBtn">Зберегти вагу</button>
     <p class="hint">Калорії й КБЖУ вносяться окремо у вкладці «Їжа».</p>
     <div id="dailyError" class="hint" style="color:var(--bad);"></div>
@@ -688,18 +696,31 @@ function renderDaily(){
 }
 
 function attachDailyHandlers(){
+  const viewDate = selectedWeightDate;
+
+  const weightDatePicker = document.getElementById('weightDatePicker');
+  if(weightDatePicker){
+    weightDatePicker.onchange = ()=>{
+      const val = weightDatePicker.value;
+      if(val){ selectedWeightDate = val; render(); }
+    };
+  }
+  const weightDateTodayBtn = document.getElementById('weightDateTodayBtn');
+  if(weightDateTodayBtn){
+    weightDateTodayBtn.onclick = ()=>{ selectedWeightDate = todayISO(); render(); };
+  }
+
   document.getElementById('saveDailyBtn').onclick = async ()=>{
     const weight = parseFloat(document.getElementById('d_weight').value);
     if(!weight){
       document.getElementById('dailyError').textContent = 'Вкажи вагу.';
       return;
     }
-    const today = todayISO();
-    const totals = getDayMacroTotals(today);
+    const totals = getDayMacroTotals(viewDate);
     const entry = {weight, calories: totals.kcal, protein: totals.protein, fat: totals.fat, carbs: totals.carbs};
     try{
-      await window.storage.set("daily:"+today, JSON.stringify(entry));
-      dailyEntries[today] = entry;
+      await window.storage.set("daily:"+viewDate, JSON.stringify(entry));
+      dailyEntries[viewDate] = entry;
       render();
     }catch(e){
       document.getElementById('dailyError').textContent = 'Не вдалося зберегти запис.';
@@ -1607,43 +1628,53 @@ async function generateTomorrowPlan(){
 }
 
 
+function pearsonCorrelation(xs, ys){
+  const n = xs.length;
+  if(n<2) return null;
+  const meanX = xs.reduce((a,b)=>a+b,0)/n;
+  const meanY = ys.reduce((a,b)=>a+b,0)/n;
+  let num=0, denX=0, denY=0;
+  for(let i=0;i<n;i++){
+    const dx = xs[i]-meanX, dy = ys[i]-meanY;
+    num += dx*dy;
+    denX += dx*dx;
+    denY += dy*dy;
+  }
+  if(denX===0||denY===0) return null;
+  return num/Math.sqrt(denX*denY);
+}
+
 function renderTable(){
   const c = calc();
   const dates = sortedDates(dailyEntries);
-  let cumEaten = 0;
+  let cumEaten = 0, cumProtein = 0, cumFat = 0, cumCarbs = 0;
   const rows = [];
+  const deficitSeries = [];
+  const lossSeries = [];
   for(let i=0;i<dates.length;i++){
     const d = dates[i];
     const e = dailyEntries[d];
     const dayNum = daysBetween(setup.startDate, d) + 1;
     cumEaten += e.calories;
+    cumProtein += e.protein||0;
+    cumFat += e.fat||0;
+    cumCarbs += e.carbs||0;
     const cumExpended = c.tdee * dayNum;
     const diff = cumEaten - cumExpended;
     const actualChangeG = (e.weight - setup.startWeight)*1000;
     const normChangeG = -(c.weeklyLossG/7)*dayNum;
 
-    // Day-over-day check: did that day's calorie deficit line up with the weight move vs the previous entry?
     const dailyDeficit = c.tdee - e.calories; // positive = ate less than burned that day
-    let weightChangeVsPrev = null;
-    let correlates = null;
     if(i>0){
       const prevE = dailyEntries[dates[i-1]];
       if(prevE.weight!=null && e.weight!=null && !isNaN(prevE.weight) && !isNaN(e.weight)){
-        weightChangeVsPrev = (e.weight - prevE.weight)*1000;
-        const deficitSide = dailyDeficit>0; // true = деficit, false = профіцит/рівно
-        const weightSide = weightChangeVsPrev<=0; // true = схудла/без змін, false = набрала
-        correlates = deficitSide === weightSide;
+        const lossG = -(e.weight - prevE.weight)*1000; // positive = lost weight vs previous day
+        deficitSeries.push(dailyDeficit);
+        lossSeries.push(lossG);
       }
     }
-    rows.push({d, dayNum, cumEaten, cumExpended, diff, actualChangeG, normChangeG, dailyDeficit, weightChangeVsPrev, correlates});
+    rows.push({d, dayNum, cumEaten, cumExpended, diff, actualChangeG, normChangeG, cumProtein, cumFat, cumCarbs});
   }
-
-  const correlationCell = r => {
-    if(r.correlates===null) return `<td class="muted">—</td>`;
-    return r.correlates
-      ? `<td class="pos">✓ збігається</td>`
-      : `<td class="neg">✗ не збігається</td>`;
-  };
 
   const dailyRows = rows.slice().reverse().map(r=>`
     <tr>
@@ -1653,16 +1684,51 @@ function renderTable(){
       <td class="${r.diff<=0?'pos':'neg'}">${signed(r.diff)}</td>
       <td class="${r.actualChangeG<=0?'pos':'neg'}">${signed(r.actualChangeG)} г</td>
       <td class="muted">${signed(r.normChangeG)} г</td>
-      ${correlationCell(r)}
     </tr>`).join('');
 
-  const validCorrelationRows = rows.filter(r=>r.correlates!==null);
-  const matchCount = validCorrelationRows.filter(r=>r.correlates).length;
-  const correlationPct = validCorrelationRows.length>0 ? Math.round((matchCount/validCorrelationRows.length)*100) : null;
-  const correlationSummary = correlationPct!==null ? `
-    <p class="small" style="margin-top:10px;">
-      За ${validCorrelationRows.length} ${validCorrelationRows.length===1?'день з порівнянням':'днів з порівнянням'} дефіцит калорій і напрямок зміни ваги збігались у <b>${matchCount}</b> (${correlationPct}%). Одноденні розбіжності — це нормально (вода, сіль, цикл, стрес); дивись радше на тижневий тренд, ніж на щоденні коливання.
-    </p>` : `<p class="small" style="margin-top:10px;">Потрібно принаймні два дні поспіль із зваженням, щоб порахувати кореляцію.</p>`;
+  const lastRow = rows[rows.length-1];
+  const daysTracked = rows.length;
+  const bjuSummary = lastRow ? (()=>{
+    const plannedKcal = c.targetCalories*daysTracked;
+    const plannedProtein = c.proteinG*daysTracked;
+    const plannedFat = c.fatG*daysTracked;
+    const plannedCarbs = c.carbsG*daysTracked;
+    const rows4 = [
+      {label:'Калорії', planned:plannedKcal, eaten:lastRow.cumEaten, unit:'ккал'},
+      {label:'Білки', planned:plannedProtein, eaten:lastRow.cumProtein, unit:'г'},
+      {label:'Жири', planned:plannedFat, eaten:lastRow.cumFat, unit:'г'},
+      {label:'Вуглеводи', planned:plannedCarbs, eaten:lastRow.cumCarbs, unit:'г'},
+    ];
+    return rows4.map(x=>{
+      const dev = x.eaten - x.planned;
+      return `<tr>
+        <td>${x.label}</td>
+        <td>${fmt(x.planned)} ${x.unit}</td>
+        <td>${fmt(x.eaten)} ${x.unit}</td>
+        <td class="${dev<=0?'pos':'neg'}">${signed(dev)} ${x.unit}</td>
+      </tr>`;
+    }).join('');
+  })() : '';
+
+  const r = pearsonCorrelation(deficitSeries, lossSeries);
+  let correlationText;
+  if(r===null){
+    correlationText = 'Потрібно щонайменше два дні поспіль із зваженням, щоб порахувати коефіцієнт.';
+  } else {
+    let strength;
+    if(r>=0.7) strength = 'сильний зв\'язок — дефіцит калорій добре передбачає динаміку ваги.';
+    else if(r>=0.4) strength = 'помірний зв\'язок — загальна тенденція простежується, але з помітним шумом.';
+    else if(r>=0.1) strength = 'слабкий зв\'язок — вага реагує на дефіцит непослідовно.';
+    else if(r>-0.1) strength = 'зв\'язку майже немає — коливання ваги (вода, сіль, цикл, стрес) переважають над впливом калорій день у день.';
+    else strength = 'зворотний зв\'язок — вага рухається не так, як передбачає дефіцит; можливо, варто скоригувати оцінку витрати калорій (TDEE) у налаштуваннях.';
+    correlationText = `r = <b>${r.toFixed(2)}</b> (від −1 до +1, чим ближче до +1 — тим точніше щоденний дефіцит передбачає втрату ваги). ${strength}`;
+  }
+  const correlationSummary = `
+    <div class="card">
+      <h2>Коефіцієнт кореляції: дефіцит і зміна ваги</h2>
+      <p class="small">${correlationText}</p>
+      <p class="hint">Рахується по днях, де є зважування два дні поспіль: зіставляє щоденний дефіцит калорій (норма мінус з'їдене) з тим, скільки ваги реально було втрачено чи набрано проти попереднього дня.</p>
+    </div>`;
 
   // Weekly summary: group by ISO week number from start date
   const weeks = {};
@@ -1715,12 +1781,22 @@ function renderTable(){
         <th>Різниця (дефіцит/профіцит)</th>
         <th>Зміна ваги з початку</th>
         <th>Норма зміни на цей день</th>
-        <th>Дефіцит ↔ вага (до вчора)</th>
       </tr></thead>
       <tbody>${dailyRows}</tbody>
-    </table></div>
-    ${correlationSummary}`}
+    </table></div>`}
   </div>
+
+  ${rows.length>0 ? `
+  <div class="card">
+    <h2>Накопичене КБЖУ: заплановано vs з'їдено</h2>
+    <p class="small">За весь період відстеження (${daysTracked} ${daysTracked===1?'день':'днів'}).</p>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Показник</th><th>Заплановано</th><th>З'їдено</th><th>Відхилення</th></tr></thead>
+      <tbody>${bjuSummary}</tbody>
+    </table></div>
+  </div>` : ''}
+
+  ${correlationSummary}
 
   <div class="card">
     <h2>Тижневе зведення</h2>
