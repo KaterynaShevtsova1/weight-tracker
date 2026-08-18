@@ -672,6 +672,7 @@ function renderActivityTimelineSVG(){
   let d = new Date(startDate+"T00:00:00");
   const end = new Date(endDate+"T00:00:00");
   while(d<=end){ dates.push(todayISO(d)); d.setDate(d.getDate()+1); }
+  dates.reverse(); // найновіші дати зліва, щоб сьогодні було видно одразу без прокрутки
   if(dates.length===0) return null;
 
   const daySpacing = 22;
