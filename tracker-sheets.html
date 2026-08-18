@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="uk">
 <head>
@@ -114,8 +113,6 @@
   <nav class="tabs" id="tabs" style="display:none;">
     <button data-tab="dashboard" class="active">Огляд</button>
     <button data-tab="daily">Щоденник</button>
-    <button data-tab="meals">Їжа</button>
-    <button data-tab="measure">Заміри тіла</button>
     <button data-tab="recipes">Рецепти</button>
     <button data-tab="tomorrow">На завтра</button>
     <button data-tab="table">Таблиця</button>
@@ -223,9 +220,16 @@ let tomorrowPlans = {};  // date -> {breakfast,lunch,dinner}
 let foodEntries = {};    // date -> array of {id,name,grams,kcal,protein,fat,carbs,source}
 let myRecipes = [];      // array of {id,name,kcal,protein,fat,carbs} saved custom dishes
 let alcoholEntries = {}; // date -> 'none' | 'had'
+let workoutEntries = {}; // date -> array of workout type keys done that day, e.g. ['strength','gymnastics']
 let currentTab = 'dashboard';
-let selectedMealDate = todayISO(); // which day the "Їжа" tab is currently editing
-let selectedWeightDate = todayISO(); // which day the "Щоденник" tab is currently editing
+let selectedEntryDate = todayISO(); // which day the single "Щоденник" input page is currently editing
+
+const WORKOUT_TYPES = [
+  {key:'strength',   label:'Силові',    color:'var(--teal)'},
+  {key:'elliptical', label:'Орбітрек',  color:'var(--gold)'},
+  {key:'gymnastics', label:'Гімнастика',color:'var(--rose)'},
+];
+const WORKOUT_WEEKLY_TARGET = 3;
 
 async function loadAll(){
   setup = null;
@@ -236,6 +240,7 @@ async function loadAll(){
   foodEntries = {};
   myRecipes = [];
   alcoholEntries = {};
+  workoutEntries = {};
 
   let items = [];
   try{
@@ -255,6 +260,7 @@ async function loadAll(){
       else if(key.startsWith("tomorrowPlan:")){ tomorrowPlans[key.slice(13)] = JSON.parse(value); }
       else if(key.startsWith("food:")){ foodEntries[key.slice(5)] = JSON.parse(value); }
       else if(key.startsWith("alcohol:")){ alcoholEntries[key.slice(8)] = JSON.parse(value); }
+      else if(key.startsWith("workout:")){ workoutEntries[key.slice(8)] = JSON.parse(value); }
     }catch(e){ /* skip a malformed row rather than failing the whole load */ }
   }
 }
@@ -291,6 +297,43 @@ function getLatestWeight(){
   const dates = sortedDates(dailyEntries);
   if(dates.length===0) return setup ? setup.startWeight : null;
   return dailyEntries[dates[dates.length-1]].weight;
+}
+
+// Per-day "what should my weight be" trajectory, based purely on cumulative
+// actual calories eaten vs. TDEE — same math as the calorie-forecast stat card,
+// but computed for every tracked day so it can be drawn as a line on the chart.
+function computeCalorieForecastSeries(){
+  if(!setup) return [];
+  const c = calc();
+  const dates = sortedDates(dailyEntries);
+  let cumEaten = 0;
+  const series = [];
+  for(const d of dates){
+    const e = dailyEntries[d];
+    const dayNum = daysBetween(setup.startDate, d) + 1;
+    cumEaten += e.calories||0;
+    const cumExpended = c.tdee * dayNum;
+    const diff = cumEaten - cumExpended;
+    const expectedChangeG = diff/7.7; // 7700 ккал ≈ 1 кг жиру
+    const predictedWeight = setup.startWeight + expectedChangeG/1000;
+    series.push({date:d, weight: (e.weight!=null && !isNaN(e.weight)) ? e.weight : null, predictedWeight});
+  }
+  return series;
+}
+
+// Weekly (week 1 = days 1-7 from startDate) counts of workouts done, per type.
+function computeWeeklyWorkoutCounts(){
+  if(!setup) return [];
+  const weeks = {};
+  Object.keys(workoutEntries).forEach(d=>{
+    const dayNum = daysBetween(setup.startDate, d) + 1;
+    if(dayNum<1) return; // ignore stray entries before the official start date
+    const wk = Math.floor((dayNum-1)/7)+1;
+    if(!weeks[wk]) weeks[wk] = {week:wk, strength:0, elliptical:0, gymnastics:0};
+    const types = workoutEntries[d]||[];
+    types.forEach(t=>{ if(weeks[wk][t]!==undefined) weeks[wk][t]++; });
+  });
+  return Object.keys(weeks).sort((a,b)=>a-b).map(k=>weeks[k]);
 }
 
 let loading = false;
@@ -349,9 +392,7 @@ function render(){
   [...tabsNav.children].forEach(b=>b.classList.toggle('active', b.dataset.tab===currentTab));
 
   if(currentTab==='dashboard') app.innerHTML = renderDashboard();
-  if(currentTab==='daily') app.innerHTML = renderDaily();
-  if(currentTab==='meals') app.innerHTML = renderMeals();
-  if(currentTab==='measure') app.innerHTML = renderMeasure();
+  if(currentTab==='daily') app.innerHTML = renderEntryPage();
   if(currentTab==='recipes') app.innerHTML = renderRecipes();
   if(currentTab==='tomorrow') app.innerHTML = renderTomorrow();
   if(currentTab==='table') app.innerHTML = renderTable();
@@ -359,9 +400,7 @@ function render(){
   if(currentTab==='connection') app.innerHTML = renderConnectionForm();
 
   attachTabHandlers();
-  if(currentTab==='daily') attachDailyHandlers();
-  if(currentTab==='meals') attachMealsHandlers();
-  if(currentTab==='measure') attachMeasureHandlers();
+  if(currentTab==='daily') attachEntryPageHandlers();
   if(currentTab==='tomorrow') attachTomorrowHandlers();
   if(currentTab==='setup') attachSetupHandlers(false);
   if(currentTab==='connection') attachConnectionHandlers();
@@ -487,25 +526,41 @@ function attachSetupHandlers(first){
 }
 
 // ---------- DASHBOARD ----------
-function renderWeightChartSVG(dates, entries){
-  const points = dates.map(d=>({date:d, weight:entries[d].weight})).filter(p=>p.weight!=null && !isNaN(p.weight));
-  if(points.length<2) return null;
+// series: array of {date, weight (actual, may be null), predictedWeight (calorie-based forecast)}
+function renderWeightChartSVG(series){
+  if(!series || series.length<2) return null;
 
-  const width=680, height=220;
+  const width=680, height=240;
   const marginLeft=52, marginRight=16, marginTop=16, marginBottom=28;
   const plotW = width-marginLeft-marginRight;
   const plotH = height-marginTop-marginBottom;
 
-  const weights = points.map(p=>p.weight);
-  const minW = Math.min(...weights), maxW = Math.max(...weights);
+  const allVals = [];
+  series.forEach(p=>{
+    if(p.weight!=null && !isNaN(p.weight)) allVals.push(p.weight);
+    if(p.predictedWeight!=null && !isNaN(p.predictedWeight)) allVals.push(p.predictedWeight);
+  });
+  if(allVals.length<2) return null;
+  const minW = Math.min(...allVals), maxW = Math.max(...allVals);
   const pad = Math.max(0.4, (maxW-minW)*0.2) || 1;
   const yMin = minW-pad, yMax = maxW+pad;
 
-  const xStep = points.length>1 ? plotW/(points.length-1) : 0;
+  const xStep = series.length>1 ? plotW/(series.length-1) : 0;
   const xPos = i => marginLeft + i*xStep;
   const yPos = w => marginTop + (yMax-w)/((yMax-yMin)||1)*plotH;
 
-  const pathD = points.map((p,i)=> (i===0?'M':'L') + xPos(i).toFixed(1) + ' ' + yPos(p.weight).toFixed(1)).join(' ');
+  // Actual-weight line: break the path wherever a day has no weight logged.
+  let actualPathD = '', segmentOpen = false;
+  series.forEach((p,i)=>{
+    if(p.weight!=null && !isNaN(p.weight)){
+      actualPathD += (segmentOpen?' L':' M') + xPos(i).toFixed(1) + ' ' + yPos(p.weight).toFixed(1);
+      segmentOpen = true;
+    } else {
+      segmentOpen = false;
+    }
+  });
+
+  const forecastPathD = series.map((p,i)=> (i===0?'M':'L') + xPos(i).toFixed(1) + ' ' + yPos(p.predictedWeight).toFixed(1)).join(' ');
 
   const ticks = 4;
   let gridLines = '', yLabels = '';
@@ -517,24 +572,82 @@ function renderWeightChartSVG(dates, entries){
   }
 
   let xLabels = '';
-  const labelIdxs = points.length<=4 ? points.map((_,i)=>i) : [0, Math.floor((points.length-1)/2), points.length-1];
+  const labelIdxs = series.length<=4 ? series.map((_,i)=>i) : [0, Math.floor((series.length-1)/2), series.length-1];
   labelIdxs.forEach(i=>{
-    const d = points[i].date.slice(5); // MM-DD
+    const d = series[i].date.slice(5); // MM-DD
     xLabels += `<text x="${xPos(i).toFixed(1)}" y="${height-8}" text-anchor="middle" font-size="11" fill="var(--ink-soft)" font-family="Inter, sans-serif">${d}</text>`;
   });
 
   let dots = '';
-  points.forEach((p,i)=>{
-    dots += `<circle cx="${xPos(i).toFixed(1)}" cy="${yPos(p.weight).toFixed(1)}" r="3.5" fill="var(--teal)"/>`;
+  series.forEach((p,i)=>{
+    if(p.weight!=null && !isNaN(p.weight)){
+      dots += `<circle cx="${xPos(i).toFixed(1)}" cy="${yPos(p.weight).toFixed(1)}" r="3.5" fill="var(--teal)"/>`;
+    }
   });
 
   return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" style="display:block;">
     ${gridLines}
     ${yLabels}
-    <path d="${pathD}" fill="none" stroke="var(--teal)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="${forecastPathD}" fill="none" stroke="var(--gold)" stroke-width="2" stroke-dasharray="5 4" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="${actualPathD}" fill="none" stroke="var(--teal)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
     ${dots}
     ${xLabels}
-  </svg>`;
+  </svg>
+  <div style="display:flex; gap:18px; flex-wrap:wrap; margin-top:8px;">
+    <span class="small" style="display:flex; align-items:center; gap:6px;"><span style="width:14px; height:3px; background:var(--teal); display:inline-block; border-radius:2px;"></span>Фактична вага</span>
+    <span class="small" style="display:flex; align-items:center; gap:6px;"><span style="width:14px; height:0; border-top:2px dashed var(--gold); display:inline-block;"></span>Прогноз за з'їденими калоріями</span>
+  </div>`;
+}
+
+// Grouped weekly bar chart: actual workout counts per type vs the 3x/week target.
+function renderActivityChartSVG(weeklyCounts){
+  if(!weeklyCounts || weeklyCounts.length===0) return null;
+
+  const width=680, height=240;
+  const marginLeft=36, marginRight=16, marginTop=16, marginBottom=32;
+  const plotW = width-marginLeft-marginRight;
+  const plotH = height-marginTop-marginBottom;
+
+  const maxCount = Math.max(WORKOUT_WEEKLY_TARGET, ...weeklyCounts.map(w=>Math.max(w.strength,w.elliptical,w.gymnastics)));
+  const yMax = maxCount+1;
+  const yPos = v => marginTop + (yMax-v)/yMax*plotH;
+
+  const groupW = plotW/weeklyCounts.length;
+  const barW = Math.min(16, groupW/4.2);
+  const gap = 3;
+
+  let bars = '', xLabels = '';
+  weeklyCounts.forEach((w,gi)=>{
+    const groupCenter = marginLeft + groupW*gi + groupW/2;
+    WORKOUT_TYPES.forEach((t,ti)=>{
+      const val = w[t.key]||0;
+      const bx = groupCenter + (ti-1)*(barW+gap) - barW/2;
+      const by = yPos(val);
+      const bh = (marginTop+plotH) - by;
+      bars += `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${barW}" height="${Math.max(0,bh).toFixed(1)}" fill="${t.color}" rx="2"/>`;
+    });
+    xLabels += `<text x="${groupCenter.toFixed(1)}" y="${height-10}" text-anchor="middle" font-size="11" fill="var(--ink-soft)" font-family="Inter, sans-serif">Тиж. ${w.week}</text>`;
+  });
+
+  const targetY = yPos(WORKOUT_WEEKLY_TARGET);
+  const targetLine = `<line x1="${marginLeft}" y1="${targetY.toFixed(1)}" x2="${width-marginRight}" y2="${targetY.toFixed(1)}" stroke="var(--ink-soft)" stroke-width="1.5" stroke-dasharray="4 4"/>
+    <text x="${width-marginRight}" y="${(targetY-5).toFixed(1)}" text-anchor="end" font-size="10.5" fill="var(--ink-soft)" font-family="Inter, sans-serif">ціль: ${WORKOUT_WEEKLY_TARGET}/тиж.</text>`;
+
+  let gridLines = '';
+  for(let v=0; v<=yMax; v++){
+    const y = yPos(v);
+    gridLines += `<line x1="${marginLeft}" y1="${y.toFixed(1)}" x2="${width-marginRight}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`;
+  }
+
+  const legend = WORKOUT_TYPES.map(t=>`<span class="small" style="display:flex; align-items:center; gap:6px;"><span style="width:11px; height:11px; background:${t.color}; display:inline-block; border-radius:3px;"></span>${t.label}</span>`).join('');
+
+  return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" style="display:block;">
+    ${gridLines}
+    ${bars}
+    ${targetLine}
+    ${xLabels}
+  </svg>
+  <div style="display:flex; gap:18px; flex-wrap:wrap; margin-top:8px;">${legend}</div>`;
 }
 
 function renderDashboard(){
@@ -560,7 +673,27 @@ function renderDashboard(){
   }
   const plannedDate = c.weeksToGoal!==null ? addDaysToDate(setup.startDate, c.weeksToGoal*7) : null;
 
+  // Прогноз ваги виключно за фактично з'їденими калоріями (без прив'язки до плану)
+  let calorieForecast = null;
+  if(dates.length>0){
+    const lastDate = dates[dates.length-1];
+    const trackedDayNum = daysBetween(setup.startDate, lastDate) + 1;
+    let cumEatenSoFar = 0;
+    dates.forEach(d=>{ cumEatenSoFar += dailyEntries[d].calories||0; });
+    const cumExpendedSoFar = c.tdee * trackedDayNum;
+    const diffSoFar = cumEatenSoFar - cumExpendedSoFar; // позитивне = профіцит, від'ємне = дефіцит
+    const expectedChangeG = diffSoFar/7.7; // 7700 ккал ≈ 1 кг жиру
+    const predictedWeight = setup.startWeight + expectedChangeG/1000;
+    const actualWeight = dailyEntries[lastDate].weight;
+    const gapG = actualWeight!=null ? (actualWeight - predictedWeight)*1000 : null;
+    calorieForecast = {lastDate, trackedDayNum, cumEatenSoFar, cumExpendedSoFar, diffSoFar, expectedChangeG, predictedWeight, actualWeight, gapG};
+  }
+
   const quote = MOTIVATION[daysElapsed % MOTIVATION.length];
+
+  const weeklyWorkoutCounts = computeWeeklyWorkoutCounts();
+  const currentWeekNum = Math.floor((daysElapsed-1)/7)+1;
+  const currentWeekCounts = weeklyWorkoutCounts.find(w=>w.week===currentWeekNum) || {strength:0, elliptical:0, gymnastics:0};
 
   let deviationBlock = '';
   if(todayEntry){
@@ -622,8 +755,21 @@ function renderDashboard(){
       <div class="label">Змінилось з початку</div>
       <div class="value ${(latestWeight-setup.startWeight)<=0?'good':'bad'}">${signed((latestWeight-setup.startWeight)*1000)} г (${signed(latestWeight-setup.startWeight,1)} кг)</div>
     </div>` : ''}
-    ${renderWeightChartSVG(dates, dailyEntries) || '<div class="empty">Потрібно щонайменше 2 записи ваги, щоб побудувати графік</div>'}
+    ${renderWeightChartSVG(computeCalorieForecastSeries()) || '<div class="empty">Потрібно щонайменше 2 записи, щоб побудувати графік</div>'}
   </div>
+
+  ${calorieForecast ? `
+  <div class="card">
+    <h2>Прогноз ваги за з'їденими калоріями</h2>
+    <p class="small">Якби вага змінювалась виключно від співвідношення з'їдених і витрачених калорій (без урахування води, м'язів, гормонів тощо) — за ${fmt(calorieForecast.trackedDayNum)} ${daysWord(calorieForecast.trackedDayNum)} з накопиченим ${calorieForecast.diffSoFar<=0?'дефіцитом':'профіцитом'} ${fmt(Math.abs(calorieForecast.diffSoFar))} ккал вага мала б:</p>
+    <div class="stat-grid" style="margin-top:14px;">
+      <div class="stat"><div class="label">${calorieForecast.expectedChangeG<=0?'Знизитись на':'Зрости на'}</div><div class="value ${calorieForecast.expectedChangeG<=0?'good':'bad'}">${fmt(Math.abs(calorieForecast.expectedChangeG))} г</div></div>
+      <div class="stat"><div class="label">Прогнозована вага</div><div class="value">${fmt(calorieForecast.predictedWeight,1)} кг</div></div>
+      <div class="stat"><div class="label">Фактична вага</div><div class="value">${fmt(calorieForecast.actualWeight,1)} кг</div></div>
+      <div class="stat"><div class="label">Розбіжність факт/прогноз</div><div class="value ${Math.abs(calorieForecast.gapG)<300?'good':''}">${signed(calorieForecast.gapG)} г</div></div>
+    </div>
+    <p class="hint" style="margin-top:10px;">${calorieForecast.gapG>0? 'Фактична вага вища за прогноз із калорій — найчастіше це вода, сіль, м\'язова маса чи трохи занижена оцінка TDEE, а не "провал".' : calorieForecast.gapG<0? 'Фактична вага нижча за прогноз із калорій — тіло реагує навіть краще, ніж передбачають самі калорії.' : 'Прогноз і факт майже збігаються.'}</p>
+  </div>` : ''}
 
   <div class="card">
     <h2>Прогрес до цілі</h2>
@@ -668,6 +814,20 @@ function renderDashboard(){
   })()}
 
   <div class="card">
+    <h2>Активність — план ${WORKOUT_WEEKLY_TARGET}× на тиждень по кожному виду</h2>
+    <p class="small">Тренування відмічаються у вкладці «Щоденник». Тиждень ${currentWeekNum} з початку схуднення.</p>
+    <div class="stat-grid" style="margin-top:14px;">
+      ${WORKOUT_TYPES.map(t=>{
+        const n = currentWeekCounts[t.key]||0;
+        return `<div class="stat"><div class="label">${t.label} цього тижня</div><div class="value ${n>=WORKOUT_WEEKLY_TARGET?'good':''}">${n} / ${WORKOUT_WEEKLY_TARGET}</div></div>`;
+      }).join('')}
+    </div>
+    ${weeklyWorkoutCounts.length>0 ? `
+    <div style="margin-top:16px;">${renderActivityChartSVG(weeklyWorkoutCounts)}</div>
+    ` : '<div class="empty">Ще немає жодного відміченого тренування</div>'}
+  </div>
+
+  <div class="card">
     <h2>Мотивація дня</h2>
     <div class="quote">"${quote}"</div>
   </div>
@@ -682,20 +842,240 @@ function daysWord(n){
   return 'днів';
 }
 
-// ---------- DAILY ----------
-function renderDaily(){
-  const viewDate = selectedWeightDate;
+// ---------- SINGLE INPUT PAGE (Щоденник): вага, тренування, алкоголь, їжа, заміри — все за одну дату ----------
+function renderEntryPage(){
+  const viewDate = selectedEntryDate;
   const isToday = viewDate === todayISO();
-  const existing = dailyEntries[viewDate] || {weight:''};
-  const dates = sortedDates(dailyEntries).slice().reverse();
+  const dayLabel = isToday ? 'сьогодні' : viewDate;
   const c = calc();
-  const currentAlcoholStatus = alcoholEntries[viewDate];
 
-  const rows = dates.map(d=>{
+  const existingDaily = dailyEntries[viewDate] || {weight:''};
+  const currentAlcoholStatus = alcoholEntries[viewDate];
+  const currentWorkouts = workoutEntries[viewDate] || [];
+  const existingMeasure = measureEntries[viewDate] || {chest:'', waist:'', hips:''};
+  const initialMeasure = setup.initialMeasurements || {};
+
+  const entries = foodEntries[viewDate] || [];
+  const totals = getDayMacroTotals(viewDate);
+  const todaysPlan = tomorrowPlans[viewDate]; // plans are stored keyed by the date they're FOR
+
+  const dateNav = `
+  <div class="card">
+    <div class="row-flex">
+      <h2 style="margin:0;">Який день заповнюємо</h2>
+      <span class="small muted">${isToday? 'Сьогодні' : 'Заднім числом'}</span>
+    </div>
+    <p class="small">Одна дата для всього нижче: вага, тренування, алкоголь, їжа і заміри тіла.</p>
+    <div class="grid2" style="align-items:end;">
+      <div><label>Дата</label><input type="date" id="entryDatePicker" value="${viewDate}" max="${todayISO()}"></div>
+      <div><button class="ghost" id="entryDateTodayBtn" style="margin-top:0;">Повернутись до сьогодні</button></div>
+    </div>
+  </div>`;
+
+  const weightBlock = `
+  <div class="card">
+    <h2>Вага</h2>
+    <p class="small">Ідеальне КБЖУ на день: ${fmt(c.targetCalories)} ккал · Б ${fmt(c.proteinG)} г · Ж ${fmt(c.fatG)} г · В ${fmt(c.carbsG)} г</p>
+    <label>Вага за ${dayLabel} (кг)</label><input type="number" step="0.1" id="d_weight" value="${existingDaily.weight ?? ''}">
+    <button class="primary" id="saveDailyBtn">Зберегти вагу</button>
+    <div id="dailyError" class="hint" style="color:var(--bad);"></div>
+  </div>`;
+
+  const workoutBlock = `
+  <div class="card">
+    <h2>Тренування за ${dayLabel}</h2>
+    <p class="small">Можна відмітити кілька видів в один день. Ціль — по ${WORKOUT_WEEKLY_TARGET} рази на тиждень для кожного виду (див. графік в «Огляді»).</p>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      ${WORKOUT_TYPES.map(t=>`<button class="workout-toggle-btn ${currentWorkouts.includes(t.key)?'primary':'ghost'}" data-type="${t.key}" style="margin-top:0;">${t.label}</button>`).join('')}
+    </div>
+    <div id="workoutStatus" class="hint"></div>
+  </div>`;
+
+  const alcoholBlock = `
+  <div class="card">
+    <h2>Алкоголь за ${dayLabel}</h2>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <button class="${currentAlcoholStatus==='none'?'primary':'ghost'}" id="alcNoneBtn" style="margin-top:0;">Без алкоголю</button>
+      <button class="${currentAlcoholStatus==='had'?'primary':'ghost'}" id="alcHadBtn" style="margin-top:0;">Був алкоголь</button>
+      ${currentAlcoholStatus? `<button class="ghost" id="alcClearBtn" style="margin-top:0;">Прибрати позначку</button>` : ''}
+    </div>
+    <div id="alcStatus" class="hint"></div>
+  </div>`;
+
+  const measureBlock = `
+  <div class="card">
+    <h2>Заміри тіла за ${dayLabel}</h2>
+    <p class="small">Роби раз на тиждень. Початкові заміри (${setup.startDate}): груди ${initialMeasure.chest||'—'} см · талія ${initialMeasure.waist||'—'} см · стегна ${initialMeasure.hips||'—'} см</p>
+    <div class="grid3">
+      <div><label>Груди (см)</label><input type="number" step="0.1" id="m_chest" value="${existingMeasure.chest}"></div>
+      <div><label>Талія (см)</label><input type="number" step="0.1" id="m_waist" value="${existingMeasure.waist}"></div>
+      <div><label>Стегна (см)</label><input type="number" step="0.1" id="m_hips" value="${existingMeasure.hips}"></div>
+    </div>
+    <button class="primary" id="saveMeasureBtn">Зберегти заміри за ${dayLabel}</button>
+    <div id="measureError" class="hint" style="color:var(--bad);"></div>
+  </div>`;
+
+  const remaining = {
+    kcal: c.targetCalories - totals.kcal,
+    protein: c.proteinG - totals.protein,
+    fat: c.fatG - totals.fat,
+    carbs: c.carbsG - totals.carbs,
+  };
+  const remainingBlock = `
+  <div class="card">
+    <div class="row-flex">
+      <h2 style="margin:0;">Залишилось на ${dayLabel}</h2>
+      <span class="small muted">з'їдено ${fmt(totals.kcal)} із ${fmt(c.targetCalories)} ккал</span>
+    </div>
+    <div class="stat-grid" style="margin-top:14px;">
+      <div class="stat"><div class="label">Калорії</div><div class="value ${remaining.kcal>=0?'good':'bad'}">${remaining.kcal>=0? fmt(remaining.kcal)+' ккал' : signed(remaining.kcal)+' ккал'}</div></div>
+      <div class="stat"><div class="label">Білки</div><div class="value ${remaining.protein>=0?'good':'bad'}">${remaining.protein>=0? fmt(remaining.protein,1)+' г' : signed(remaining.protein,1)+' г'}</div></div>
+      <div class="stat"><div class="label">Жири</div><div class="value ${remaining.fat>=0?'good':'bad'}">${remaining.fat>=0? fmt(remaining.fat,1)+' г' : signed(remaining.fat,1)+' г'}</div></div>
+      <div class="stat"><div class="label">Вуглеводи</div><div class="value ${remaining.carbs>=0?'good':'bad'}">${remaining.carbs>=0? fmt(remaining.carbs,1)+' г' : signed(remaining.carbs,1)+' г'}</div></div>
+    </div>
+    ${remaining.kcal<0? `<p class="hint" style="color:var(--bad); margin-top:10px;">Денну норму вже перевищено на ${fmt(Math.abs(remaining.kcal))} ккал.</p>` : `<p class="hint" style="margin-top:10px;">Стільки ще можна спожити ${dayLabel==='сьогодні'?'сьогодні':'у цей день'}, щоб втриматись у нормі.</p>`}
+  </div>`;
+
+  const fittingRecipes = getFittingRecipes(remaining);
+  let fittingBlock = '';
+  if(remaining.kcal<=60){
+    fittingBlock = `
+    <div class="card">
+      <h2>Що можна з'їсти на залишок дня</h2>
+      <p class="small">Калорійний бюджет на сьогодні майже або повністю вичерпано — варіантів із бази рецептів під це вже не пропоную. Якщо ще голодна, обирай щось дуже легке: овочі, зелень, чай без цукру.</p>
+    </div>`;
+  } else if(fittingRecipes.length===0){
+    const tightBits = [];
+    if(remaining.protein<=4) tightBits.push('білках');
+    if(remaining.fat<=4) tightBits.push('жирах');
+    if(remaining.carbs<=6) tightBits.push('вуглеводах');
+    const reason = tightBits.length>0
+      ? `У тебе вже майже не лишилось запасу в ${tightBits.join(' і ')} — тому навіть під підходящі за калоріями страви з бази рецептів зараз нічого не проходить.`
+      : `Під твій залишок (${fmt(remaining.kcal)} ккал, Б${fmt(remaining.protein,1)} Ж${fmt(remaining.fat,1)} В${fmt(remaining.carbs,1)}) точного збігу в базі рецептів немає.`;
+    fittingBlock = `
+    <div class="card">
+      <h2>Що можна з'їсти на залишок дня</h2>
+      <p class="small">${reason} Спробуй щось невелике й підлаштоване під ці цифри: нежирний білок невеликими шматком (курка/риба/тофу), овочі, або страву з розділу «Своя страва» з точним КБЖУ під те, що лишилось.</p>
+    </div>`;
+  } else {
+    const mealLabels = {breakfast:"сніданок", lunch:"обід", dinner:"вечеря"};
+    const cards = fittingRecipes.map(r=>`
+      <div style="border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:10px; background:#FAF5FE;">
+        <div class="row-flex">
+          <b style="font-size:13.5px;">${r.name}</b>
+          <span class="small muted">${r.kcal} ккал · Б${r.protein} Ж${r.fat} В${r.carbs}</span>
+        </div>
+        <div class="small muted" style="margin-top:2px;">Зазвичай як ${mealLabels[r.meal]}</div>
+        <div class="small" style="margin-top:6px; line-height:1.5;">${r.desc}</div>
+      </div>`).join('');
+    fittingBlock = `
+    <div class="card">
+      <h2>Що можна з'їсти на залишок дня</h2>
+      <p class="small">Варіанти, які вкладаються у твій залишок ${fmt(remaining.kcal)} ккал.</p>
+      ${cards}
+    </div>`;
+  }
+
+  let planBlock = '';
+  if(todaysPlan){
+    const mealLabels = {breakfast:"Сніданок", lunch:"Обід", dinner:"Вечеря"};
+    const rows = ['breakfast','lunch','dinner'].map(key=>{
+      const m = todaysPlan[key];
+      if(!m) return '';
+      const recipeId = 'recipe:'+key;
+      const alreadyLogged = entries.some(e=>e.id===recipeId);
+      return `
+      <label style="display:flex; align-items:flex-start; gap:10px; padding:10px 0; border-bottom:1px solid var(--line);">
+        <input type="checkbox" class="recipe-eaten-check" data-key="${key}" data-recipeid="${recipeId}" ${alreadyLogged?'checked':''} style="width:auto; margin-top:3px;">
+        <span>
+          <b>${mealLabels[key]}: ${m.name||''}</b><br>
+          <span class="small muted">${fmt(m.kcal)} ккал · Б${fmt(m.protein)} Ж${fmt(m.fat)} В${fmt(m.carbs)}</span>
+        </span>
+      </label>`;
+    }).join('');
+    planBlock = `
+    <div class="card">
+      <h2>Меню на ${dayLabel} за планом</h2>
+      <p class="small">Познач, якщо ти дотрималась запропонованого рецепту — він додасться у фактичні дані нижче.</p>
+      ${rows}
+    </div>`;
+  }
+
+  const entriesRows = entries.map(e=>`
+    <tr>
+      <td>${e.name}${e.grams? ' <span class="muted">('+fmt(e.grams)+' г)</span>' : ''}</td>
+      <td>${fmt(e.kcal)}</td>
+      <td>${fmt(e.protein,1)}</td>
+      <td>${fmt(e.fat,1)}</td>
+      <td>${fmt(e.carbs,1)}</td>
+      <td><button class="ghost remove-food-btn" data-id="${e.id}" style="margin:0; padding:4px 10px; font-size:12px;">Прибрати</button></td>
+    </tr>`).join('');
+
+  const myRecipesRows = myRecipes.map(r=>`
+    <div style="display:flex; justify-content:space-between; align-items:center; border:1px solid var(--line); border-radius:10px; padding:10px 14px; margin-top:8px; background:#FAF5FE;">
+      <div>
+        <b style="font-size:13.5px;">${r.name}</b>
+        <div class="small muted">${fmt(r.kcal)} ккал · Б${fmt(r.protein,1)} Ж${fmt(r.fat,1)} В${fmt(r.carbs,1)}</div>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button class="ghost add-my-recipe-btn" data-id="${r.id}" style="margin:0; padding:6px 12px; font-size:12px;">Додати на ${dayLabel}</button>
+        <button class="ghost delete-my-recipe-btn" data-id="${r.id}" style="margin:0; padding:6px 12px; font-size:12px;">Видалити</button>
+      </div>
+    </div>`).join('');
+
+  const foodBlock = `
+  ${remainingBlock}
+  ${fittingBlock}
+  ${planBlock}
+  <div class="card">
+    <h2>Своя страва — внести КБЖУ вручну</h2>
+    <p class="small">Якщо страви немає в базі продуктів — впиши назву і своє КБЖУ напряму (наприклад, з упаковки або з іншого джерела).</p>
+    <div class="grid2">
+      <div><label>Назва страви</label><input type="text" id="custom_name" placeholder="напр. Домашній борщ"></div>
+      <div><label>Калорії (ккал)</label><input type="number" id="custom_kcal" placeholder="напр. 350"></div>
+    </div>
+    <div class="grid3">
+      <div><label>Білки (г)</label><input type="number" step="0.1" id="custom_protein" placeholder="0"></div>
+      <div><label>Жири (г)</label><input type="number" step="0.1" id="custom_fat" placeholder="0"></div>
+      <div><label>Вуглеводи (г)</label><input type="number" step="0.1" id="custom_carbs" placeholder="0"></div>
+    </div>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
+      <input type="checkbox" id="custom_save_recipe" style="width:auto;">
+      <span class="small" style="margin:0;">Зберегти як мій рецепт (щоб швидко додавати знову)</span>
+    </label>
+    <button class="primary" id="addCustomBtn">Додати страву на ${dayLabel}</button>
+    <div id="customError" class="hint" style="color:var(--bad);"></div>
+  </div>
+
+  ${myRecipes.length>0 ? `
+  <div class="card">
+    <h2>Мої рецепти</h2>
+    <p class="small">Збережені страви — додай в один тап, без повторного введення цифр.</p>
+    ${myRecipesRows}
+  </div>` : ''}
+
+  <div class="card">
+    <div class="row-flex">
+      <h2 style="margin:0;">З'їдено ${dayLabel==='сьогодні'?'сьогодні':'за '+dayLabel}</h2>
+      <span class="badge">${fmt(totals.kcal)} / ${fmt(c.targetCalories)} ккал</span>
+    </div>
+    ${entries.length===0? '<div class="empty">Ще нічого не додано</div>' : `
+    <div class="tablewrap"><table>
+      <thead><tr><th>Продукт</th><th>Ккал</th><th>Б, г</th><th>Ж, г</th><th>В, г</th><th></th></tr></thead>
+      <tbody>${entriesRows}</tbody>
+      <tfoot><tr style="font-weight:600;"><td>Разом</td><td>${fmt(totals.kcal)}</td><td>${fmt(totals.protein,1)}</td><td>${fmt(totals.fat,1)}</td><td>${fmt(totals.carbs,1)}</td><td></td></tr></tfoot>
+    </table></div>`}
+  </div>`;
+
+  // Combined history of daily entries (weight/food/alcohol/workout together)
+  const dailyDates = sortedDates(dailyEntries).slice().reverse();
+  const historyRows = dailyDates.map(d=>{
     const e = dailyEntries[d];
     const dev = (e.calories||0) - c.targetCalories;
     const alc = alcoholEntries[d];
     const alcCell = alc==='none' ? '<span class="pos">без алкоголю</span>' : alc==='had' ? '<span class="neg">був алкоголь</span>' : '<span class="muted">—</span>';
+    const workouts = workoutEntries[d] || [];
+    const workoutCell = workouts.length>0 ? workouts.map(k=>WORKOUT_TYPES.find(t=>t.key===k)?.label||k).join(', ') : '<span class="muted">—</span>';
     return `<tr>
       <td>${d}</td>
       <td>${fmt(e.weight,1)} кг</td>
@@ -705,61 +1085,83 @@ function renderDaily(){
       <td>${e.carbs!==undefined && e.carbs!==null? fmt(e.carbs)+' г':'—'}</td>
       <td class="${dev<=0?'pos':'neg'}">${signed(dev)}</td>
       <td>${alcCell}</td>
+      <td>${workoutCell}</td>
     </tr>`;
   }).join('');
-
-  return `
-  <div class="card">
-    <div class="row-flex">
-      <h2 style="margin:0;">Запис ваги</h2>
-      <span class="small muted">${isToday? 'Сьогодні' : 'Заднім числом'}</span>
-    </div>
-    <p class="small">Ідеальне КБЖУ на день: ${fmt(c.targetCalories)} ккал · Б ${fmt(c.proteinG)} г · Ж ${fmt(c.fatG)} г · В ${fmt(c.carbsG)} г</p>
-    <div class="grid2" style="align-items:end;">
-      <div><label>Дата</label><input type="date" id="weightDatePicker" value="${viewDate}" max="${todayISO()}"></div>
-      <div><button class="ghost" id="weightDateTodayBtn" style="margin-top:0;">Повернутись до сьогодні</button></div>
-    </div>
-    <label>Вага за ${isToday?'сьогодні':viewDate} (кг)</label><input type="number" step="0.1" id="d_weight" value="${existing.weight ?? ''}">
-    <button class="primary" id="saveDailyBtn">Зберегти вагу</button>
-    <p class="hint">Калорії й КБЖУ вносяться окремо у вкладці «Їжа».</p>
-    <div id="dailyError" class="hint" style="color:var(--bad);"></div>
-  </div>
-
-  <div class="card">
-    <h2>Алкоголь за ${isToday?'сьогодні':viewDate}</h2>
-    <p class="small">Можна позначити будь-який день, включно з минулими — просто зміни дату вище.</p>
-    <div style="display:flex; gap:10px; flex-wrap:wrap;">
-      <button class="${currentAlcoholStatus==='none'?'primary':'ghost'}" id="alcNoneBtn" style="margin-top:0;">Без алкоголю</button>
-      <button class="${currentAlcoholStatus==='had'?'primary':'ghost'}" id="alcHadBtn" style="margin-top:0;">Був алкоголь</button>
-      ${currentAlcoholStatus? `<button class="ghost" id="alcClearBtn" style="margin-top:0;">Прибрати позначку</button>` : ''}
-    </div>
-    <div id="alcStatus" class="hint"></div>
-  </div>
-
+  const historyBlock = `
   <div class="card">
     <h2>Історія записів</h2>
-    ${dates.length===0? '<div class="empty">Записів ще немає</div>' : `
+    ${dailyDates.length===0? '<div class="empty">Записів ще немає</div>' : `
     <div class="tablewrap"><table>
-      <thead><tr><th>Дата</th><th>Вага</th><th>Калорії</th><th>Білки</th><th>Жири</th><th>Вуглеводи</th><th>Відхилення від норми</th><th>Алкоголь</th></tr></thead>
-      <tbody>${rows}</tbody>
+      <thead><tr><th>Дата</th><th>Вага</th><th>Калорії</th><th>Білки</th><th>Жири</th><th>Вуглеводи</th><th>Відхилення від норми</th><th>Алкоголь</th><th>Тренування</th></tr></thead>
+      <tbody>${historyRows}</tbody>
     </table></div>`}
-  </div>
+  </div>`;
+
+  // Body-measurement history stays keyed separately (measurements aren't logged every day)
+  const measureDates = sortedDates(measureEntries);
+  const measureRows = measureDates.map((d,i)=>{
+    const e = measureEntries[d];
+    const prev = i>0 ? measureEntries[measureDates[i-1]] : initialMeasure;
+    const diffChest = (prev && prev.chest && e.chest) ? e.chest-prev.chest : null;
+    const diffWaist = (prev && prev.waist && e.waist) ? e.waist-prev.waist : null;
+    const diffHips = (prev && prev.hips && e.hips) ? e.hips-prev.hips : null;
+    const diffChestStart = (initialMeasure.chest && e.chest) ? e.chest-initialMeasure.chest : null;
+    const diffWaistStart = (initialMeasure.waist && e.waist) ? e.waist-initialMeasure.waist : null;
+    const diffHipsStart = (initialMeasure.hips && e.hips) ? e.hips-initialMeasure.hips : null;
+    return `<tr>
+      <td>${d}</td>
+      <td>${e.chest?fmt(e.chest,1):'—'} см</td>
+      <td>${diffChest!==null?signed(diffChest,1):'—'}</td>
+      <td>${diffChestStart!==null?signed(diffChestStart,1):'—'}</td>
+      <td>${e.waist?fmt(e.waist,1):'—'} см</td>
+      <td>${diffWaist!==null?signed(diffWaist,1):'—'}</td>
+      <td>${diffWaistStart!==null?signed(diffWaistStart,1):'—'}</td>
+      <td>${e.hips?fmt(e.hips,1):'—'} см</td>
+      <td>${diffHips!==null?signed(diffHips,1):'—'}</td>
+      <td>${diffHipsStart!==null?signed(diffHipsStart,1):'—'}</td>
+    </tr>`;
+  }).join('');
+  const measureHistoryBlock = `
+  <div class="card">
+    <h2>Динаміка замірів</h2>
+    ${measureDates.length===0? '<div class="empty">Замірів ще немає</div>' : `
+    <div class="tablewrap"><table>
+      <thead><tr>
+        <th>Дата</th>
+        <th>Груди</th><th>Δ тиждень</th><th>Δ від старту</th>
+        <th>Талія</th><th>Δ тиждень</th><th>Δ від старту</th>
+        <th>Стегна</th><th>Δ тиждень</th><th>Δ від старту</th>
+      </tr></thead>
+      <tbody>${measureRows}</tbody>
+    </table></div>`}
+  </div>`;
+
+  return `
+  ${dateNav}
+  ${weightBlock}
+  ${workoutBlock}
+  ${alcoholBlock}
+  ${foodBlock}
+  ${measureBlock}
+  ${historyBlock}
+  ${measureHistoryBlock}
   `;
 }
 
-function attachDailyHandlers(){
-  const viewDate = selectedWeightDate;
+function attachEntryPageHandlers(){
+  const viewDate = selectedEntryDate;
 
-  const weightDatePicker = document.getElementById('weightDatePicker');
-  if(weightDatePicker){
-    weightDatePicker.onchange = ()=>{
-      const val = weightDatePicker.value;
-      if(val){ selectedWeightDate = val; render(); }
+  const entryDatePicker = document.getElementById('entryDatePicker');
+  if(entryDatePicker){
+    entryDatePicker.onchange = ()=>{
+      const val = entryDatePicker.value;
+      if(val){ selectedEntryDate = val; render(); }
     };
   }
-  const weightDateTodayBtn = document.getElementById('weightDateTodayBtn');
-  if(weightDateTodayBtn){
-    weightDateTodayBtn.onclick = ()=>{ selectedWeightDate = todayISO(); render(); };
+  const entryDateTodayBtn = document.getElementById('entryDateTodayBtn');
+  if(entryDateTodayBtn){
+    entryDateTodayBtn.onclick = ()=>{ selectedEntryDate = todayISO(); render(); };
   }
 
   document.getElementById('saveDailyBtn').onclick = async ()=>{
@@ -800,68 +1202,29 @@ function attachDailyHandlers(){
   if(alcHadBtn) alcHadBtn.onclick = ()=>setAlcohol('had');
   const alcClearBtn = document.getElementById('alcClearBtn');
   if(alcClearBtn) alcClearBtn.onclick = ()=>setAlcohol(null);
-}
 
-// ---------- MEASUREMENTS ----------
-function renderMeasure(){
-  const today = todayISO();
-  const existing = measureEntries[today] || {chest:'', waist:'', hips:''};
-  const dates = sortedDates(measureEntries);
-  const initial = setup.initialMeasurements || {};
+  document.querySelectorAll('.workout-toggle-btn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const type = btn.dataset.type;
+      const current = workoutEntries[viewDate] || [];
+      const isOn = current.includes(type);
+      const next = isOn ? current.filter(t=>t!==type) : [...current, type];
+      try{
+        if(next.length===0){
+          await window.storage.delete("workout:"+viewDate);
+          delete workoutEntries[viewDate];
+        } else {
+          await window.storage.set("workout:"+viewDate, JSON.stringify(next));
+          workoutEntries[viewDate] = next;
+        }
+        render();
+      }catch(e){
+        const el = document.getElementById('workoutStatus');
+        if(el){ el.textContent = 'Не вдалося зберегти тренування.'; el.style.color = 'var(--bad)'; }
+      }
+    };
+  });
 
-  const rows = dates.map((d,i)=>{
-    const e = measureEntries[d];
-    const prev = i>0 ? measureEntries[dates[i-1]] : initial;
-    const diffChest = (prev && prev.chest && e.chest) ? e.chest-prev.chest : null;
-    const diffWaist = (prev && prev.waist && e.waist) ? e.waist-prev.waist : null;
-    const diffHips = (prev && prev.hips && e.hips) ? e.hips-prev.hips : null;
-    const diffChestStart = (initial.chest && e.chest) ? e.chest-initial.chest : null;
-    const diffWaistStart = (initial.waist && e.waist) ? e.waist-initial.waist : null;
-    const diffHipsStart = (initial.hips && e.hips) ? e.hips-initial.hips : null;
-    return `<tr>
-      <td>${d}</td>
-      <td>${e.chest?fmt(e.chest,1):'—'} см</td>
-      <td>${diffChest!==null?signed(diffChest,1):'—'}</td>
-      <td>${diffChestStart!==null?signed(diffChestStart,1):'—'}</td>
-      <td>${e.waist?fmt(e.waist,1):'—'} см</td>
-      <td>${diffWaist!==null?signed(diffWaist,1):'—'}</td>
-      <td>${diffWaistStart!==null?signed(diffWaistStart,1):'—'}</td>
-      <td>${e.hips?fmt(e.hips,1):'—'} см</td>
-      <td>${diffHips!==null?signed(diffHips,1):'—'}</td>
-      <td>${diffHipsStart!==null?signed(diffHipsStart,1):'—'}</td>
-    </tr>`;
-  }).join('');
-
-  return `
-  <div class="card">
-    <h2>Заміри тіла — раз на тиждень</h2>
-    <p class="small">Початкові заміри (${setup.startDate}): груди ${initial.chest||'—'} см · талія ${initial.waist||'—'} см · стегна ${initial.hips||'—'} см</p>
-    <div class="grid3">
-      <div><label>Груди (см)</label><input type="number" step="0.1" id="m_chest" value="${existing.chest}"></div>
-      <div><label>Талія (см)</label><input type="number" step="0.1" id="m_waist" value="${existing.waist}"></div>
-      <div><label>Стегна (см)</label><input type="number" step="0.1" id="m_hips" value="${existing.hips}"></div>
-    </div>
-    <button class="primary" id="saveMeasureBtn">Зберегти заміри (${today})</button>
-    <div id="measureError" class="hint" style="color:var(--bad);"></div>
-  </div>
-
-  <div class="card">
-    <h2>Динаміка замірів</h2>
-    ${dates.length===0? '<div class="empty">Замірів ще немає</div>' : `
-    <div class="tablewrap"><table>
-      <thead><tr>
-        <th rowspan="1">Дата</th>
-        <th>Груди</th><th>Δ тиждень</th><th>Δ від старту</th>
-        <th>Талія</th><th>Δ тиждень</th><th>Δ від старту</th>
-        <th>Стегна</th><th>Δ тиждень</th><th>Δ від старту</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>`}
-  </div>
-  `;
-}
-
-function attachMeasureHandlers(){
   document.getElementById('saveMeasureBtn').onclick = async ()=>{
     const chest = parseFloat(document.getElementById('m_chest').value);
     const waist = parseFloat(document.getElementById('m_waist').value);
@@ -870,19 +1233,112 @@ function attachMeasureHandlers(){
       document.getElementById('measureError').textContent = 'Заповни хоча б один замір.';
       return;
     }
-    const today = todayISO();
     const entry = {chest:chest||null, waist:waist||null, hips:hips||null};
     try{
-      await window.storage.set("measure:"+today, JSON.stringify(entry));
-      measureEntries[today] = entry;
+      await window.storage.set("measure:"+viewDate, JSON.stringify(entry));
+      measureEntries[viewDate] = entry;
       render();
     }catch(e){
       document.getElementById('measureError').textContent = 'Не вдалося зберегти заміри.';
     }
   };
+
+  document.querySelectorAll('.remove-food-btn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      await removeFoodEntry(viewDate, btn.dataset.id);
+      render();
+    };
+  });
+
+  const addCustomBtn = document.getElementById('addCustomBtn');
+  if(addCustomBtn){
+    addCustomBtn.onclick = async ()=>{
+      const name = document.getElementById('custom_name').value.trim();
+      const kcal = parseFloat(document.getElementById('custom_kcal').value);
+      const protein = parseFloat(document.getElementById('custom_protein').value) || 0;
+      const fat = parseFloat(document.getElementById('custom_fat').value) || 0;
+      const carbs = parseFloat(document.getElementById('custom_carbs').value) || 0;
+      const saveAsRecipe = document.getElementById('custom_save_recipe').checked;
+      const errEl = document.getElementById('customError');
+      if(!name){ errEl.textContent = 'Вкажи назву страви.'; return; }
+      if(!kcal || kcal<=0){ errEl.textContent = 'Вкажи калорійність.'; return; }
+      addCustomBtn.disabled = true; addCustomBtn.textContent = 'Додаю…';
+      const entry = {
+        id: 'c_'+Date.now()+'_'+Math.round(Math.random()*10000),
+        name, grams:null, kcal:Math.round(kcal), protein, fat, carbs,
+        source: 'custom'
+      };
+      try{
+        await addFoodEntry(viewDate, entry);
+        if(saveAsRecipe){
+          const recipe = {id:'r_'+Date.now()+'_'+Math.round(Math.random()*10000), name, kcal:Math.round(kcal), protein, fat, carbs};
+          myRecipes.push(recipe);
+          await window.storage.set("myRecipes", JSON.stringify(myRecipes));
+        }
+        render();
+      }catch(e){
+        errEl.textContent = 'Не вдалося додати страву.';
+        addCustomBtn.disabled = false; addCustomBtn.textContent = 'Додати страву';
+      }
+    };
+  }
+
+  document.querySelectorAll('.add-my-recipe-btn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const recipe = myRecipes.find(r=>r.id===btn.dataset.id);
+      if(!recipe) return;
+      await addFoodEntry(viewDate, {
+        id: 'c_'+Date.now()+'_'+Math.round(Math.random()*10000),
+        name: recipe.name, grams:null,
+        kcal: recipe.kcal, protein: recipe.protein, fat: recipe.fat, carbs: recipe.carbs,
+        source: 'myrecipe'
+      });
+      render();
+    };
+  });
+
+  document.querySelectorAll('.delete-my-recipe-btn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      myRecipes = myRecipes.filter(r=>r.id!==btn.dataset.id);
+      try{ await window.storage.set("myRecipes", JSON.stringify(myRecipes)); }catch(e){}
+      render();
+    };
+  });
+
+  document.querySelectorAll('.recipe-eaten-check').forEach(cb=>{
+    cb.onchange = async ()=>{
+      const key = cb.dataset.key;
+      const recipeId = cb.dataset.recipeid;
+      const plan = tomorrowPlans[viewDate];
+      if(!plan || !plan[key]) return;
+      if(cb.checked){
+        const m = plan[key];
+        const mealLabels = {breakfast:"Сніданок за рецептом", lunch:"Обід за рецептом", dinner:"Вечеря за рецептом"};
+        await addFoodEntry(viewDate, {
+          id: recipeId,
+          name: (mealLabels[key]||'')+': '+(m.name||''),
+          grams: null,
+          kcal: m.kcal||0, protein: m.protein||0, fat: m.fat||0, carbs: m.carbs||0,
+          source: 'recipe:'+key
+        });
+      } else {
+        await removeFoodEntry(viewDate, recipeId);
+      }
+      render();
+    };
+  });
 }
 
 // ---------- RECIPES ----------
+const SAUCES = [
+  {name:"Укропно-йогуртовий соус для риби", kcal:116, protein:8, fat:5, carbs:10,
+   desc:"Натуральний йогурт з лимонним соком, кропом і часником — готується за 3 хвилини, дуже мало калорій. Ідеально до білої або червоної риби.", portion:"на кілька порцій (~4-5 ст.л. заправки)"},
+  {name:"Найпростіший йогуртово-гірчичний соус", kcal:180, protein:8, fat:15, carbs:6,
+   desc:"Нежирний йогурт (до 10%) з гірчицею і часником за смаком — підходить до будь-якої м'ясної страви.", portion:"на кілька порцій"},
+  {name:"Легкий соус на основі йогурту (правило вибору)", kcal:null, protein:null, fat:null, carbs:null,
+   desc:"Загальне правило: обирай соуси з не більше ніж 4-7 г жиру на 100 г за етикеткою — такі можна спокійно використовувати по 30-40 г, не турбуючись про калорійність.", portion:"орієнтир для вибору готових соусів"},
+];
+
 const RECIPES = {
   breakfast: [
     {name:"Грецький йогурт з ягодами й насінням чіа", kcal:320, protein:24, fat:10, carbs:34,
@@ -939,6 +1395,22 @@ const RECIPES = {
      desc:"Панкейки з борошна, банана, яйця і молока, обсмажені на олії; подавати зі свіжими ягодами."},
     {name:"Сендвіч з лососем і скремблом", kcal:635, protein:45, fat:33, carbs:39,
      desc:"Яєчний скремблл на маслі з хлібом і слабосоленим лососем зверху — ситний білковий сніданок."},
+    {name:"Овочевий омлет (високобілковий)", kcal:310, protein:36, fat:16, carbs:8,
+     desc:"Яйця з додатковими білками і молоком, запечені з томатом, шпинатом і легким твердим сиром."},
+    {name:"Вівсяний білковий омлет", kcal:390, protein:66, fat:10, carbs:31,
+     desc:"Вівсянка, збита блендером з яєчними білками, цілим яйцем і нежирним сиром до однорідної маси, обсмажена як омлет — дуже високий вміст білка."},
+    {name:"Білковий панкейк", kcal:305, protein:40, fat:3, carbs:30,
+     desc:"Вівсяне борошно, яєчні білки і skyr/густий йогурт, збиті блендером і обсмажені на сухій сковороді під кришкою. Можна урізноманітнити: варіант-десерт (+йогурт, ягоди, трохи меду) або шоколадний (+какао)."},
+    {name:"Білкові млинці", kcal:525, protein:60, fat:15, carbs:30,
+     desc:"Яйця, яєчні білки, творог і вівсяне борошно, збиті блендером у рідке тісто; смажені тонкими млинцями на сухій сковороді. Можна додати сироватковий протеїн для більшого білка."},
+    {name:"Омлет з броколі та овочами", kcal:363, protein:33, fat:14, carbs:25,
+     desc:"Яйця з білками і йогуртом, залиті на обсмажені броколі, перець, цибулю та помідори чері; готуються під кришкою до готовності."},
+    {name:"Супер білкові вафлі (порція 2 шт)", kcal:267, protein:33, fat:7, carbs:17,
+     desc:"Тертий м'який і легкий сир, яйце та білок, змішані з борошном у густе тісто й випечені у вафельниці до хрусткої скоринки. Дуже високий вміст білка при малій калорійності."},
+    {name:"Стандарт сніданок на всі віки", kcal:587, protein:41, fat:23, carbs:57,
+     desc:"Смажені яйця з додатковими білками, вівсянка на молоці з ягодами — класичне поєднання яєчні та каші в один прийом їжі."},
+    {name:"Сніданок з яйцем на коржику", kcal:370, protein:30, fat:18, carbs:21,
+     desc:"Яєчня на цільнозерновому коржику з тонкими скибочками легкого сиру і нежирною індичою шинкою."},
   ],
   lunch: [
     {name:"Куряче філе з гречкою й овочами", kcal:520, protein:42, fat:14, carbs:56,
@@ -995,6 +1467,40 @@ const RECIPES = {
      desc:"Філе минтая, запечене під шаром картоплі і яєчно-молочної заливки."},
     {name:"Гречка з великою порцією курки", kcal:495, protein:61, fat:8, carbs:45,
      desc:"Варена гречка з великою порцією куриного філе і свіжими помідорами — дуже білковий обід."},
+    {name:"Правильний Цезар", kcal:400, protein:52, fat:12, carbs:22,
+     desc:"Відварене куряче філе з листовим салатом, огірком, помідорами і вареним яйцем під йогуртово-часниковим соусом."},
+    {name:"Салат з капустою, огірками і кукурудзою", kcal:240, protein:10, fat:5, carbs:48,
+     desc:"Нашаткована капуста з огірками і консервованою кукурудзою під легкою сметанною заправкою."},
+    {name:"Простий салатик з куркою і огірком", kcal:289, protein:47, fat:7, carbs:10,
+     desc:"Куряче філе з огірком, сиром і цибулею під йогуртовою заправкою з часником."},
+    {name:"Риба в овочевому соусі", kcal:197, protein:30, fat:2, carbs:16,
+     desc:"Біле філе риби (хек/пангасіус/минтай), тушковане в соусі з томатів, часнику й болгарського перцю до м'якості."},
+    {name:"Ніжна куряча запіканка з сиром", kcal:310, protein:45, fat:12, carbs:2,
+     desc:"Дрібно нарізане куряче філе, запечене з яйцями, моцарелою і кисломолочним сиром до рум'яної скоринки. Рецепт на ~6 порцій, дуже пісний за вуглеводами."},
+    {name:"Курячі котлети з морквою і кабачком", kcal:250, protein:26, fat:9, carbs:17,
+     desc:"Курячий фарш з тертою морквою, кабачком і цибулею, запечений у духовці до золотистого кольору."},
+    {name:"Правильна піца на лаваші", kcal:332, protein:41, fat:8, carbs:22,
+     desc:"Лаваш із запеченим куриним філе, томатною пастою, помідорами чері і легким сиром. Рецепт на ~3 порції."},
+    {name:"Курячі нагетси без олії", kcal:235, protein:41, fat:5, carbs:4,
+     desc:"Куряче філе, подрібнене в блендері, обкачане в яєчному білку і клітковині, запечене без олії й борошна. Рецепт на ~8 порцій."},
+    {name:"Рибна запіканка з морквою і сиром", kcal:287, protein:33, fat:15, carbs:6,
+     desc:"Рибне філе, запечене під шаром цибулі й моркви та залите сумішшю яйця, сметани і легкого сиру. На ~4 порції."},
+    {name:"Курячі грудки в часниковому маринаді", kcal:369, protein:54, fat:14, carbs:5,
+     desc:"Куряче філе, замариноване в соєвому соусі й часнику, начинене сиром і помідорами, запечене в духовці. На ~4 порції."},
+    {name:"Курячі млинці з печерицями і сиром", kcal:228, protein:29, fat:9, carbs:5,
+     desc:"Куряче філе й печериці, перемелені в блендері з яйцем, сиром і крохмалем, обсмажені як млинці. На ~5 порцій."},
+    {name:"Куряча запіканка з мексиканською сумішшю", kcal:242, protein:37, fat:8, carbs:5,
+     desc:"Шматочки курячого філе, запечені з овочевою мексиканською сумішшю під яєчно-йогуртовою заливкою із сиром. На ~4 порції."},
+    {name:"Рол з лаваша з куркою та овочами", kcal:426, protein:40, fat:8, carbs:45,
+     desc:"Лаваш з обсмаженим куриним філе, свіжими овочами, часником і йогуртовим соусом, згорнутий рулетом. Рецепт на 4 роли."},
+    {name:"Курячі котлетки з сиром", kcal:216, protein:38, fat:5, carbs:4,
+     desc:"Куряча грудка, пропущена через м'ясорубку зі знежиреним сиром, цибулею і яйцем, запечена в духовці. На 4 котлети, дуже пісні."},
+    {name:"Тушене куряче філе із солодким перцем", kcal:231, protein:37, fat:4, carbs:10,
+     desc:"Куряче філе, тушковане з морквою, цибулею і болгарським перцем із соєвим соусом до м'якості. На ~8 порцій."},
+    {name:"Запечена курка з яблуками", kcal:220, protein:33, fat:5, carbs:11,
+     desc:"Куряче філе, обсмажене з яблуком і цибулею, залите томатно-молочною сумішшю та запечене в духовці. На ~3 порції."},
+    {name:"Білкова піца з начинкою (порція ~200г)", kcal:290, protein:26, fat:13, carbs:15,
+     desc:"Основа з яєць, кисломолочного сиру, борошна і молока, зверху м'ясо, легкий сир і овочі за смаком, запечена 20 хв при 180°. Автор дає КБЖУ на 100 г готового продукту — тут перерахунок на порцію ~200 г."},
   ],
   dinner: [
     {name:"Індичка з овочами на пару", kcal:430, protein:36, fat:14, carbs:34,
@@ -1051,6 +1557,38 @@ const RECIPES = {
      desc:"Тортилья з великою порцією курячого філе, свіжим огірком і помідором."},
     {name:"Молочний коктейль з какао і бananом", kcal:433, protein:24, fat:12, carbs:63,
      desc:"Молоко, какао, вівсянка, яєчний білок, питний йогурт і банан, збиті блендером — легка вечеря чи перекус."},
+    {name:"Курячий салат на вечерю (велика порція)", kcal:905, protein:136, fat:32, carbs:14,
+     desc:"Куряче філе, огірки і яйця з нежирним сиром і натуральним йогуртом — велика порція, добре ділиться на дві."},
+    {name:"Салат з квасолею і яйцями", kcal:487, protein:37, fat:15, carbs:54,
+     desc:"Консервована квасоля з вареними яйцями, соленим огірком і зеленню під сметанно-гірчичним соусом."},
+    {name:"Салат з тунцем, яйцями і кукурудзою", kcal:540, protein:64, fat:19, carbs:35,
+     desc:"Тунець у власному соку з вареними яйцями, кукурудзою, свіжим огірком і капустою під грецьким йогуртом."},
+    {name:"Сирні оладки в аерогрилі", kcal:611, protein:60, fat:25, carbs:33,
+     desc:"Кисломолочний сир, моцарела, яйце, білки і борошно, замішані та запечені в аерогрилі при 180° 18 хв. Рецепт виходить на 3 великі порції."},
+    {name:"Ледачі хачапурі", kcal:556, protein:43, fat:22, carbs:46,
+     desc:"Кисломолочний сир, сулугуні, молоко, борошно і яйце, обсмажені на сковороді до рум'яної скоринки. Цифри — на 1 хачапурі."},
+    {name:"Запіканка з яловичим фаршем і овочами", kcal:270, protein:31, fat:12, carbs:10,
+     desc:"Яловичий фарш, обсмажений з овочевою сумішшю wok і томатною пастою, залитий яєчно-молочною сумішшю й запечений. На ~5 порцій."},
+    {name:"Ніжні сирні оладки", kcal:190, protein:16, fat:11, carbs:8,
+     desc:"Варені й сирі яйця, кисломолочний і твердий сир, борошно та зелень, обсмажені на сковороді до золотистої скоринки. На ~4 порції."},
+    {name:"Піца з лаваша (1 шт)", kcal:185, protein:16, fat:8, carbs:12,
+     desc:"Трикутник з лаваша з яйцем, сиром, нежирною ковбасою і кетчупом, запечений у духовці 12-15 хв при 200°. Автор радить 2 штуки як повноцінний прийом їжі."},
+    {name:"Курячі кульки з капустою і морквою", kcal:330, protein:35, fat:14, carbs:15,
+     desc:"Курячий фарш з дрібно нарізаною капустою і тертою морквою, запечений у духовці або приготований на парі. Цифри на 2 кульки."},
+    {name:"Риба тушкована у сметані", kcal:261, protein:20, fat:17, carbs:6,
+     desc:"Шматочки риби, обсмажені з цибулею і тушковані в сметані до м'якого вершкового смаку. Рецепт на 5-6 порцій."},
+    {name:"Тушкована яловичина з курагою", kcal:300, protein:34, fat:11, carbs:17,
+     desc:"Яловичина, тушкована з морквою, часником, курагою та імбиром на повільному вогні близько години. На ~8 порцій."},
+    {name:"Креветки під сирним соусом", kcal:270, protein:55, fat:4, carbs:5,
+     desc:"Креветки, тушковані в молочно-часниковому соусі з тертим твердим сиром і петрушкою. На ~4 порції, дуже білково."},
+    {name:"Рибка запечена з помідорами і сиром", kcal:218, protein:36, fat:7, carbs:4,
+     desc:"Біле рибне філе, запечене під шматочками помідорів і сумішшю йогурту, гірчиці й легкого сиру. На ~4 порції."},
+    {name:"Котлети з курячого фаршу з кисломолочним сиром", kcal:154, protein:24, fat:5, carbs:3,
+     desc:"Курячий фарш, змішаний з кисломолочним сиром, яйцем і обсмаженою цибулею, запечений у духовці. Цифри — на 1 котлету з 10, дуже пісні."},
+    {name:"Курка з грибами в ніжному соусі", kcal:283, protein:41, fat:9, carbs:9,
+     desc:"Шматочки курячої грудки з печерицями і цибулею, запечені під йогуртово-вершковим соусом. На ~4 порції."},
+    {name:"Сьомга в лимонно-часниковому соусі", kcal:450, protein:39, fat:28, carbs:5,
+     desc:"Запечена сьомга з відвареною спаржею, политі соусом із шалоту, часнику, вершкового масла й лимонного соку. На ~4 порції."},
   ]
 };
 
@@ -1087,12 +1625,28 @@ function renderRecipes(){
     </div>`;
   }).join('');
 
+  const saucesBlock = SAUCES.map(s=>`
+    <div style="border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:10px; background:#FAF5FE;">
+      <div class="row-flex">
+        <b style="font-size:13.5px;">${s.name}</b>
+        <span class="small muted">${s.kcal!==null? s.kcal+' ккал · Б'+s.protein+' Ж'+s.fat+' В'+s.carbs : ''}</span>
+      </div>
+      <div class="small muted" style="margin-top:2px;">${s.portion}</div>
+      <div class="small" style="margin-top:6px; line-height:1.5;">${s.desc}</div>
+    </div>`).join('');
+
   return `
   <div class="card">
     <h2>Рецепти під твоє КБЖУ</h2>
     <p class="small">Денна норма: ${fmt(c.targetCalories)} ккал · Б ${fmt(c.proteinG)} г · Ж ${fmt(c.fatG)} г · В ${fmt(c.carbsG)} г, розподілена на 3 прийоми їжі.</p>
   </div>
   ${mealBlocks}
+
+  <div class="card">
+    <h2>Соуси</h2>
+    <p class="small">Соуси й заправки — не самостійна страва, тож рахуй їхнє КБЖУ окремим невеликим доповненням до основного прийому їжі (звичайна порція — 1-3 столові ложки).</p>
+    ${saucesBlock}
+  </div>
   `;
 }
 
@@ -1222,286 +1776,6 @@ function getFittingRecipes(remaining){
     return Math.abs(remaining.kcal-a.kcal) - Math.abs(remaining.kcal-b.kcal);
   });
   return fitting.slice(0,4);
-}
-
-function renderMeals(){
-  const viewDate = selectedMealDate;
-  const isToday = viewDate === todayISO();
-  const c = calc();
-  const entries = foodEntries[viewDate] || [];
-  const totals = getDayMacroTotals(viewDate);
-  const todaysPlan = tomorrowPlans[viewDate]; // plans are stored keyed by the date they're FOR
-
-  const dateNav = `
-  <div class="card">
-    <div class="row-flex">
-      <h2 style="margin:0;">Який день редагуємо</h2>
-      <span class="small muted">${isToday? 'Сьогодні' : 'Заднім числом'}</span>
-    </div>
-    <div class="grid2" style="align-items:end;">
-      <div><label>Дата</label><input type="date" id="mealDatePicker" value="${viewDate}" max="${todayISO()}"></div>
-      <div><button class="ghost" id="mealDateTodayBtn" style="margin-top:0;">Повернутись до сьогодні</button></div>
-    </div>
-  </div>`;
-
-  const dayLabel = isToday ? 'сьогодні' : viewDate;
-
-  const remaining = {
-    kcal: c.targetCalories - totals.kcal,
-    protein: c.proteinG - totals.protein,
-    fat: c.fatG - totals.fat,
-    carbs: c.carbsG - totals.carbs,
-  };
-  const remainingBlock = `
-  <div class="card">
-    <div class="row-flex">
-      <h2 style="margin:0;">Залишилось на ${dayLabel}</h2>
-      <span class="small muted">з'їдено ${fmt(totals.kcal)} із ${fmt(c.targetCalories)} ккал</span>
-    </div>
-    <div class="stat-grid" style="margin-top:14px;">
-      <div class="stat"><div class="label">Калорії</div><div class="value ${remaining.kcal>=0?'good':'bad'}">${remaining.kcal>=0? fmt(remaining.kcal)+' ккал' : signed(remaining.kcal)+' ккал'}</div></div>
-      <div class="stat"><div class="label">Білки</div><div class="value ${remaining.protein>=0?'good':'bad'}">${remaining.protein>=0? fmt(remaining.protein,1)+' г' : signed(remaining.protein,1)+' г'}</div></div>
-      <div class="stat"><div class="label">Жири</div><div class="value ${remaining.fat>=0?'good':'bad'}">${remaining.fat>=0? fmt(remaining.fat,1)+' г' : signed(remaining.fat,1)+' г'}</div></div>
-      <div class="stat"><div class="label">Вуглеводи</div><div class="value ${remaining.carbs>=0?'good':'bad'}">${remaining.carbs>=0? fmt(remaining.carbs,1)+' г' : signed(remaining.carbs,1)+' г'}</div></div>
-    </div>
-    ${remaining.kcal<0? `<p class="hint" style="color:var(--bad); margin-top:10px;">Денну норму вже перевищено на ${fmt(Math.abs(remaining.kcal))} ккал.</p>` : `<p class="hint" style="margin-top:10px;">Стільки ще можна спожити ${dayLabel==='сьогодні'?'сьогодні':'у цей день'}, щоб втриматись у нормі.</p>`}
-  </div>`;
-
-  const fittingRecipes = getFittingRecipes(remaining);
-  let fittingBlock = '';
-  if(remaining.kcal<=60){
-    fittingBlock = `
-    <div class="card">
-      <h2>Що можна з'їсти на залишок дня</h2>
-      <p class="small">Калорійний бюджет на сьогодні майже або повністю вичерпано — варіантів із бази рецептів під це вже не пропоную. Якщо ще голодна, обирай щось дуже легке: овочі, зелень, чай без цукру.</p>
-    </div>`;
-  } else if(fittingRecipes.length===0){
-    const tightBits = [];
-    if(remaining.protein<=4) tightBits.push('білках');
-    if(remaining.fat<=4) tightBits.push('жирах');
-    if(remaining.carbs<=6) tightBits.push('вуглеводах');
-    const reason = tightBits.length>0
-      ? `У тебе вже майже не лишилось запасу в ${tightBits.join(' і ')} — тому навіть під підходящі за калоріями страви з бази рецептів зараз нічого не проходить.`
-      : `Під твій залишок (${fmt(remaining.kcal)} ккал, Б${fmt(remaining.protein,1)} Ж${fmt(remaining.fat,1)} В${fmt(remaining.carbs,1)}) точного збігу в базі рецептів немає.`;
-    fittingBlock = `
-    <div class="card">
-      <h2>Що можна з'їсти на залишок дня</h2>
-      <p class="small">${reason} Спробуй щось невелике й підлаштоване під ці цифри: нежирний білок невеликими шматком (курка/риба/тофу), овочі, або страву з розділу «Своя страва» з точним КБЖУ під те, що лишилось.</p>
-    </div>`;
-  } else {
-    const mealLabels = {breakfast:"сніданок", lunch:"обід", dinner:"вечеря"};
-    const cards = fittingRecipes.map(r=>`
-      <div style="border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-top:10px; background:#FAF5FE;">
-        <div class="row-flex">
-          <b style="font-size:13.5px;">${r.name}</b>
-          <span class="small muted">${r.kcal} ккал · Б${r.protein} Ж${r.fat} В${r.carbs}</span>
-        </div>
-        <div class="small muted" style="margin-top:2px;">Зазвичай як ${mealLabels[r.meal]}</div>
-        <div class="small" style="margin-top:6px; line-height:1.5;">${r.desc}</div>
-      </div>`).join('');
-    fittingBlock = `
-    <div class="card">
-      <h2>Що можна з'їсти на залишок дня</h2>
-      <p class="small">Варіанти, які вкладаються у твій залишок ${fmt(remaining.kcal)} ккал.</p>
-      ${cards}
-    </div>`;
-  }
-
-  const productOptions = Object.keys(FOOD_DB).sort((a,b)=>a.localeCompare(b,'uk')).map(name=>`<option value="${name}">`).join('');
-
-  let planBlock = '';
-  if(todaysPlan){
-    const mealLabels = {breakfast:"Сніданок", lunch:"Обід", dinner:"Вечеря"};
-    const rows = ['breakfast','lunch','dinner'].map(key=>{
-      const m = todaysPlan[key];
-      if(!m) return '';
-      const recipeId = 'recipe:'+key;
-      const alreadyLogged = entries.some(e=>e.id===recipeId);
-      return `
-      <label style="display:flex; align-items:flex-start; gap:10px; padding:10px 0; border-bottom:1px solid var(--line);">
-        <input type="checkbox" class="recipe-eaten-check" data-key="${key}" data-recipeid="${recipeId}" ${alreadyLogged?'checked':''} style="width:auto; margin-top:3px;">
-        <span>
-          <b>${mealLabels[key]}: ${m.name||''}</b><br>
-          <span class="small muted">${fmt(m.kcal)} ккал · Б${fmt(m.protein)} Ж${fmt(m.fat)} В${fmt(m.carbs)}</span>
-        </span>
-      </label>`;
-    }).join('');
-    planBlock = `
-    <div class="card">
-      <h2>Меню на ${isToday? 'сьогодні' : viewDate} за планом</h2>
-      <p class="small">Познач, якщо ти дотрималась запропонованого рецепту — він додасться у фактичні дані нижче.</p>
-      ${rows}
-    </div>`;
-  }
-
-  const entriesRows = entries.map(e=>`
-    <tr>
-      <td>${e.name}${e.grams? ' <span class="muted">('+fmt(e.grams)+' г)</span>' : ''}</td>
-      <td>${fmt(e.kcal)}</td>
-      <td>${fmt(e.protein,1)}</td>
-      <td>${fmt(e.fat,1)}</td>
-      <td>${fmt(e.carbs,1)}</td>
-      <td><button class="ghost remove-food-btn" data-id="${e.id}" style="margin:0; padding:4px 10px; font-size:12px;">Прибрати</button></td>
-    </tr>`).join('');
-
-  const myRecipesRows = myRecipes.map(r=>`
-    <div style="display:flex; justify-content:space-between; align-items:center; border:1px solid var(--line); border-radius:10px; padding:10px 14px; margin-top:8px; background:#FAF5FE;">
-      <div>
-        <b style="font-size:13.5px;">${r.name}</b>
-        <div class="small muted">${fmt(r.kcal)} ккал · Б${fmt(r.protein,1)} Ж${fmt(r.fat,1)} В${fmt(r.carbs,1)}</div>
-      </div>
-      <div style="display:flex; gap:6px;">
-        <button class="ghost add-my-recipe-btn" data-id="${r.id}" style="margin:0; padding:6px 12px; font-size:12px;">Додати на ${isToday?'сьогодні':viewDate}</button>
-        <button class="ghost delete-my-recipe-btn" data-id="${r.id}" style="margin:0; padding:6px 12px; font-size:12px;">Видалити</button>
-      </div>
-    </div>`).join('');
-
-  return `
-  ${dateNav}
-  ${remainingBlock}
-  ${fittingBlock}
-  ${planBlock}
-  <div class="card">
-    <h2>Своя страва — внести КБЖУ вручну</h2>
-    <p class="small">Якщо страви немає в базі продуктів — впиши назву і своє КБЖУ напряму (наприклад, з упаковки або з іншого джерела).</p>
-    <div class="grid2">
-      <div><label>Назва страви</label><input type="text" id="custom_name" placeholder="напр. Домашній борщ"></div>
-      <div><label>Калорії (ккал)</label><input type="number" id="custom_kcal" placeholder="напр. 350"></div>
-    </div>
-    <div class="grid3">
-      <div><label>Білки (г)</label><input type="number" step="0.1" id="custom_protein" placeholder="0"></div>
-      <div><label>Жири (г)</label><input type="number" step="0.1" id="custom_fat" placeholder="0"></div>
-      <div><label>Вуглеводи (г)</label><input type="number" step="0.1" id="custom_carbs" placeholder="0"></div>
-    </div>
-    <label style="display:flex; align-items:center; gap:8px; margin-top:14px;">
-      <input type="checkbox" id="custom_save_recipe" style="width:auto;">
-      <span class="small" style="margin:0;">Зберегти як мій рецепт (щоб швидко додавати знову)</span>
-    </label>
-    <button class="primary" id="addCustomBtn">Додати страву на ${isToday?'сьогодні':viewDate}</button>
-    <div id="customError" class="hint" style="color:var(--bad);"></div>
-  </div>
-
-  ${myRecipes.length>0 ? `
-  <div class="card">
-    <h2>Мої рецепти</h2>
-    <p class="small">Збережені страви — додай в один тап, без повторного введення цифр.</p>
-    ${myRecipesRows}
-  </div>` : ''}
-
-  <div class="card">
-    <div class="row-flex">
-      <h2 style="margin:0;">З'їдено ${isToday?'сьогодні':'за '+viewDate}</h2>
-      <span class="badge">${fmt(totals.kcal)} / ${fmt(c.targetCalories)} ккал</span>
-    </div>
-    ${entries.length===0? '<div class="empty">Ще нічого не додано</div>' : `
-    <div class="tablewrap"><table>
-      <thead><tr><th>Продукт</th><th>Ккал</th><th>Б, г</th><th>Ж, г</th><th>В, г</th><th></th></tr></thead>
-      <tbody>${entriesRows}</tbody>
-      <tfoot><tr style="font-weight:600;"><td>Разом</td><td>${fmt(totals.kcal)}</td><td>${fmt(totals.protein,1)}</td><td>${fmt(totals.fat,1)}</td><td>${fmt(totals.carbs,1)}</td><td></td></tr></tfoot>
-    </table></div>`}
-  </div>
-  `;
-}
-
-function attachMealsHandlers(){
-  const viewDate = selectedMealDate;
-
-  const mealDatePicker = document.getElementById('mealDatePicker');
-  if(mealDatePicker){
-    mealDatePicker.onchange = ()=>{
-      const val = mealDatePicker.value;
-      if(val){ selectedMealDate = val; render(); }
-    };
-  }
-  const mealDateTodayBtn = document.getElementById('mealDateTodayBtn');
-  if(mealDateTodayBtn){
-    mealDateTodayBtn.onclick = ()=>{ selectedMealDate = todayISO(); render(); };
-  }
-
-  document.querySelectorAll('.remove-food-btn').forEach(btn=>{
-    btn.onclick = async ()=>{
-      await removeFoodEntry(viewDate, btn.dataset.id);
-      render();
-    };
-  });
-
-  const addCustomBtn = document.getElementById('addCustomBtn');
-  if(addCustomBtn){
-    addCustomBtn.onclick = async ()=>{
-      const name = document.getElementById('custom_name').value.trim();
-      const kcal = parseFloat(document.getElementById('custom_kcal').value);
-      const protein = parseFloat(document.getElementById('custom_protein').value) || 0;
-      const fat = parseFloat(document.getElementById('custom_fat').value) || 0;
-      const carbs = parseFloat(document.getElementById('custom_carbs').value) || 0;
-      const saveAsRecipe = document.getElementById('custom_save_recipe').checked;
-      const errEl = document.getElementById('customError');
-      if(!name){ errEl.textContent = 'Вкажи назву страви.'; return; }
-      if(!kcal || kcal<=0){ errEl.textContent = 'Вкажи калорійність.'; return; }
-      addCustomBtn.disabled = true; addCustomBtn.textContent = 'Додаю…';
-      const entry = {
-        id: 'c_'+Date.now()+'_'+Math.round(Math.random()*10000),
-        name, grams:null, kcal:Math.round(kcal), protein, fat, carbs,
-        source: 'custom'
-      };
-      try{
-        await addFoodEntry(viewDate, entry);
-        if(saveAsRecipe){
-          const recipe = {id:'r_'+Date.now()+'_'+Math.round(Math.random()*10000), name, kcal:Math.round(kcal), protein, fat, carbs};
-          myRecipes.push(recipe);
-          await window.storage.set("myRecipes", JSON.stringify(myRecipes));
-        }
-        render();
-      }catch(e){
-        errEl.textContent = 'Не вдалося додати страву.';
-        addCustomBtn.disabled = false; addCustomBtn.textContent = 'Додати страву';
-      }
-    };
-  }
-
-  document.querySelectorAll('.add-my-recipe-btn').forEach(btn=>{
-    btn.onclick = async ()=>{
-      const recipe = myRecipes.find(r=>r.id===btn.dataset.id);
-      if(!recipe) return;
-      await addFoodEntry(viewDate, {
-        id: 'c_'+Date.now()+'_'+Math.round(Math.random()*10000),
-        name: recipe.name, grams:null,
-        kcal: recipe.kcal, protein: recipe.protein, fat: recipe.fat, carbs: recipe.carbs,
-        source: 'myrecipe'
-      });
-      render();
-    };
-  });
-
-  document.querySelectorAll('.delete-my-recipe-btn').forEach(btn=>{
-    btn.onclick = async ()=>{
-      myRecipes = myRecipes.filter(r=>r.id!==btn.dataset.id);
-      try{ await window.storage.set("myRecipes", JSON.stringify(myRecipes)); }catch(e){}
-      render();
-    };
-  });
-
-  document.querySelectorAll('.recipe-eaten-check').forEach(cb=>{
-    cb.onchange = async ()=>{
-      const key = cb.dataset.key;
-      const recipeId = cb.dataset.recipeid;
-      const plan = tomorrowPlans[viewDate];
-      if(!plan || !plan[key]) return;
-      if(cb.checked){
-        const m = plan[key];
-        const mealLabels = {breakfast:"Сніданок за рецептом", lunch:"Обід за рецептом", dinner:"Вечеря за рецептом"};
-        await addFoodEntry(viewDate, {
-          id: recipeId,
-          name: (mealLabels[key]||'')+': '+(m.name||''),
-          grams: null,
-          kcal: m.kcal||0, protein: m.protein||0, fat: m.fat||0, carbs: m.carbs||0,
-          source: 'recipe:'+key
-        });
-      } else {
-        await removeFoodEntry(viewDate, recipeId);
-      }
-      render();
-    };
-  });
 }
 
 // ---------- PANTRY & TOMORROW'S RECIPES ----------
