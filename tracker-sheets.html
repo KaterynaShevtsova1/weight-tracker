@@ -345,6 +345,21 @@ function computeCalorieForecastSeries(){
 }
 
 // Скільки тренувань кожного виду зроблено в поточному календарному тижні (пн-нд).
+// Toggle whether `type` was done on `date` and persist. Shared by the entry-page
+// buttons and the clickable dots on the dashboard timeline chart.
+async function toggleWorkoutEntry(date, type){
+  const current = workoutEntries[date] || [];
+  const isOn = current.includes(type);
+  const next = isOn ? current.filter(t=>t!==type) : [...current, type];
+  if(next.length===0){
+    await window.storage.delete("workout:"+date);
+    delete workoutEntries[date];
+  } else {
+    await window.storage.set("workout:"+date, JSON.stringify(next));
+    workoutEntries[date] = next;
+  }
+}
+
 function computeCurrentWeekCounts(){
   const monday = getWeekMonday(todayISO());
   const counts = {strength:0, elliptical:0, gymnastics:0};
@@ -445,6 +460,7 @@ function render(){
   if(currentTab==='connection') app.innerHTML = renderConnectionForm();
 
   attachTabHandlers();
+  if(currentTab==='dashboard') attachDashboardHandlers();
   if(currentTab==='daily') attachEntryPageHandlers();
   if(currentTab==='tomorrow') attachTomorrowHandlers();
   if(currentTab==='setup') attachSetupHandlers(false);
@@ -686,12 +702,15 @@ function renderActivityTimelineSVG(){
       const wd = new Date(dateStr+"T00:00:00").getDay();
       const planned = t.plannedWeekdays.includes(wd);
       const done = (workoutEntries[dateStr]||[]).includes(t.key);
+      // Bigger invisible hit-target under every marker (even the tiny "not planned" dot)
+      // so the whole cell is easy to tap, not just the visible circle itself.
+      rows += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="10" fill="#000" opacity="0" class="workout-dot" data-date="${dateStr}" data-type="${t.key}" style="cursor:pointer;"><title>${t.label} · ${dateStr}</title></circle>`;
       if(done){
-        rows += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="${t.color}"/>`;
+        rows += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="${t.color}" style="pointer-events:none;"/>`;
       } else if(planned){
-        rows += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="none" stroke="${t.color}" stroke-width="1.5" stroke-dasharray="2.5 2"/>`;
+        rows += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="none" stroke="${t.color}" stroke-width="1.5" stroke-dasharray="2.5 2" style="pointer-events:none;"/>`;
       } else {
-        rows += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2" fill="var(--line)"/>`;
+        rows += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2" fill="var(--line)" style="pointer-events:none;"/>`;
       }
     });
   });
@@ -700,6 +719,7 @@ function renderActivityTimelineSVG(){
     <span class="small" style="display:flex; align-items:center; gap:6px;"><svg width="14" height="14"><circle cx="7" cy="7" r="6" fill="var(--ink-soft)"/></svg>зроблено</span>
     <span class="small" style="display:flex; align-items:center; gap:6px;"><svg width="14" height="14"><circle cx="7" cy="7" r="6" fill="none" stroke="var(--ink-soft)" stroke-width="1.5" stroke-dasharray="2.5 2"/></svg>треба було, не зроблено</span>
     <span class="small" style="display:flex; align-items:center; gap:6px;"><svg width="14" height="14"><circle cx="7" cy="7" r="2" fill="var(--line)"/></svg>того дня не заплановано</span>
+    <span class="small muted">— клікни на будь-яке кружечко, щоб відмітити/зняти позначку</span>
   `;
 
   return `<div style="overflow-x:auto; padding-bottom:4px;">
@@ -919,6 +939,19 @@ function renderDashboard(){
   `;
 }
 
+function attachDashboardHandlers(){
+  document.querySelectorAll('.workout-dot').forEach(el=>{
+    el.onclick = async ()=>{
+      const date = el.dataset.date;
+      const type = el.dataset.type;
+      try{
+        await toggleWorkoutEntry(date, type);
+        render();
+      }catch(e){ /* silently ignore — the dot just won't visually update */ }
+    };
+  });
+}
+
 function daysWord(n){
   const n10 = n%10, n100 = n%100;
   if(n100>=11 && n100<=14) return 'днів';
@@ -969,9 +1002,15 @@ function renderEntryPage(){
   const workoutBlock = `
   <div class="card">
     <h2>Тренування за ${dayLabel}</h2>
-    <p class="small">Можна відмітити кілька видів в один день. Силові й розтяжка — пн/ср/пт, орбітрек (або 10 тис кроків) — щодня (див. графік в «Огляді»).</p>
+    <p class="small">Можна відмітити кілька видів в один день. Силові й розтяжка — пн/ср/пт, орбітрек (або 10 тис кроків) — щодня. Клікни на кружечок, щоб поставити чи зняти позначку.</p>
     <div style="display:flex; gap:10px; flex-wrap:wrap;">
-      ${WORKOUT_TYPES.map(t=>`<button class="workout-toggle-btn ${currentWorkouts.includes(t.key)?'primary':'ghost'}" data-type="${t.key}" style="margin-top:0;">${t.shortLabel}</button>`).join('')}
+      ${WORKOUT_TYPES.map(t=>{
+        const done = currentWorkouts.includes(t.key);
+        return `<button class="workout-toggle-btn" data-type="${t.key}" style="margin-top:0; display:flex; align-items:center; gap:8px; background:${done?'#FAF5FE':'transparent'}; border:1px solid var(--line); border-radius:999px; padding:8px 16px 8px 10px; cursor:pointer; font-family:inherit; font-size:13px; color:var(--ink);">
+          <svg width="18" height="18" style="flex-shrink:0;" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7" ${done?`fill="${t.color}"`:`fill="none" stroke="${t.color}" stroke-width="1.5" stroke-dasharray="2.5 2"`}/></svg>
+          ${t.shortLabel}
+        </button>`;
+      }).join('')}
     </div>
     <div id="workoutStatus" class="hint"></div>
   </div>`;
@@ -1291,17 +1330,8 @@ function attachEntryPageHandlers(){
   document.querySelectorAll('.workout-toggle-btn').forEach(btn=>{
     btn.onclick = async ()=>{
       const type = btn.dataset.type;
-      const current = workoutEntries[viewDate] || [];
-      const isOn = current.includes(type);
-      const next = isOn ? current.filter(t=>t!==type) : [...current, type];
       try{
-        if(next.length===0){
-          await window.storage.delete("workout:"+viewDate);
-          delete workoutEntries[viewDate];
-        } else {
-          await window.storage.set("workout:"+viewDate, JSON.stringify(next));
-          workoutEntries[viewDate] = next;
-        }
+        await toggleWorkoutEntry(viewDate, type);
         render();
       }catch(e){
         const el = document.getElementById('workoutStatus');
