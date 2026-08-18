@@ -336,6 +336,23 @@ function computeWeeklyWorkoutCounts(){
   return Object.keys(weeks).sort((a,b)=>a-b).map(k=>weeks[k]);
 }
 
+// Накопичено з початку: скільки тренувань кожного виду заплановано (пропорційно
+// дням з початку схуднення, з розрахунку WORKOUT_WEEKLY_TARGET на тиждень) проти факту.
+function computeActivityCumulative(daysElapsed){
+  const actual = {strength:0, elliptical:0, gymnastics:0};
+  Object.keys(workoutEntries).forEach(d=>{
+    const types = workoutEntries[d]||[];
+    types.forEach(t=>{ if(actual[t]!==undefined) actual[t]++; });
+  });
+  const plannedPerType = (WORKOUT_WEEKLY_TARGET/7)*Math.max(daysElapsed,0);
+  return WORKOUT_TYPES.map(t=>({
+    key: t.key, label: t.label,
+    planned: plannedPerType,
+    actual: actual[t.key],
+    deviation: actual[t.key]-plannedPerType,
+  }));
+}
+
 let loading = false;
 
 function render(){
@@ -694,6 +711,11 @@ function renderDashboard(){
   const weeklyWorkoutCounts = computeWeeklyWorkoutCounts();
   const currentWeekNum = Math.floor((daysElapsed-1)/7)+1;
   const currentWeekCounts = weeklyWorkoutCounts.find(w=>w.week===currentWeekNum) || {strength:0, elliptical:0, gymnastics:0};
+  const activityCumulative = computeActivityCumulative(daysElapsed);
+  const activityCumulativeTotal = {
+    planned: activityCumulative.reduce((s,r)=>s+r.planned,0),
+    actual: activityCumulative.reduce((s,r)=>s+r.actual,0),
+  };
 
   let deviationBlock = '';
   if(todayEntry){
@@ -825,6 +847,26 @@ function renderDashboard(){
     ${weeklyWorkoutCounts.length>0 ? `
     <div style="margin-top:16px;">${renderActivityChartSVG(weeklyWorkoutCounts)}</div>
     ` : '<div class="empty">Ще немає жодного відміченого тренування</div>'}
+    <hr class="divider">
+    <h3>Накопичено з початку: план vs факт</h3>
+    <p class="small">За ${fmt(daysElapsed)} ${daysWord(daysElapsed)} з початку, пропорційно до цілі ${WORKOUT_WEEKLY_TARGET}× на тиждень по кожному виду.</p>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Вид тренувань</th><th>Заплановано</th><th>Факт</th><th>Відхилення</th></tr></thead>
+      <tbody>
+        ${activityCumulative.map(r=>`<tr>
+          <td>${r.label}</td>
+          <td>${fmt(r.planned,1)}</td>
+          <td>${fmt(r.actual)}</td>
+          <td class="${r.deviation>=0?'pos':'neg'}">${signed(r.deviation,1)}</td>
+        </tr>`).join('')}
+        <tr style="font-weight:600;">
+          <td>Разом (усі види)</td>
+          <td>${fmt(activityCumulativeTotal.planned,1)}</td>
+          <td>${fmt(activityCumulativeTotal.actual)}</td>
+          <td class="${(activityCumulativeTotal.actual-activityCumulativeTotal.planned)>=0?'pos':'neg'}">${signed(activityCumulativeTotal.actual-activityCumulativeTotal.planned,1)}</td>
+        </tr>
+      </tbody>
+    </table></div>
   </div>
 
   <div class="card">
