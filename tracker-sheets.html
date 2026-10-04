@@ -221,6 +221,7 @@ let foodEntries = {};    // date -> array of {id,name,grams,kcal,protein,fat,car
 let myRecipes = [];      // array of {id,name,kcal,protein,fat,carbs} saved custom dishes
 let alcoholEntries = {}; // date -> 'none' | 'had'
 let workoutEntries = {}; // date -> array of workout type keys done that day, e.g. ['strength','gymnastics']
+let healthEntries = {}; // date -> {steps, activeKcal, restingHR} з айфона (команда «Health to tracker»)
 let currentTab = 'dashboard';
 let selectedEntryDate = todayISO(); // which day the single "Щоденник" input page is currently editing
 
@@ -264,6 +265,7 @@ async function loadAll(){
   myRecipes = [];
   alcoholEntries = {};
   workoutEntries = {};
+  healthEntries = {};
 
   let items = [];
   try{
@@ -284,6 +286,7 @@ async function loadAll(){
       else if(key.startsWith("food:")){ foodEntries[key.slice(5)] = JSON.parse(value); }
       else if(key.startsWith("alcohol:")){ alcoholEntries[key.slice(8)] = JSON.parse(value); }
       else if(key.startsWith("workout:")){ workoutEntries[key.slice(8)] = JSON.parse(value); }
+      else if(key.startsWith("health:") && /^\d{4}-\d{2}-\d{2}$/.test(key.slice(7))){ healthEntries[key.slice(7)] = JSON.parse(value); }
     }catch(e){ /* skip a malformed row rather than failing the whole load */ }
   }
 }
@@ -733,6 +736,44 @@ function renderActivityTimelineSVG(){
   <div style="display:flex; gap:16px; flex-wrap:wrap; margin-top:10px;">${legend}</div>`;
 }
 
+// ---- Кроки / ккал / пульс з айфона ----
+function healthNum(v){ if(v===null||v===undefined||v==="") return null; const n = Number(String(v).replace(/[\s\u00a0\u202f]/g,'').replace(',','.')); return isNaN(n)?null:n; }
+function renderHealthBlock(){
+  const today = todayISO();
+  const days = [];
+  for(let i=6;i>=0;i--){ const d = addDaysToDate(today,-i); days.push(todayISO(new Date(d.getTime()-d.getTimezoneOffset()*60000))); }
+  const rows = days.map(d=>{ const h = healthEntries[d]||{}; return {date:d, steps:healthNum(h.steps), kcal:healthNum(h.activeKcal), hr:healthNum(h.restingHR)}; });
+  const anyData = rows.some(r=>r.steps!==null||r.kcal!==null||r.hr!==null);
+  if(!anyData) return `<p class="small">Дані з айфона ще не надходили. Команда «Health to tracker» відправляє їх щовечора о 21:30.</p>`;
+  const t = rows[rows.length-1];
+  const stepVals = rows.map(r=>r.steps).filter(v=>v!==null);
+  const avg = stepVals.length ? Math.round(stepVals.reduce((a,b)=>a+b,0)/stepVals.length) : null;
+  const max = Math.max(10000, ...stepVals);
+  const W=560, H=150, pad=24, bw=(W-pad*2)/7;
+  const goalY = H-pad - (10000/max)*(H-pad*2);
+  const bars = rows.map((r,i)=>{
+    const x = pad + i*bw + bw*0.18, w = bw*0.64;
+    const h = r.steps!==null ? (r.steps/max)*(H-pad*2) : 0;
+    const y = H-pad-h;
+    const lbl = new Date(r.date+"T00:00:00").toLocaleDateString('uk-UA',{weekday:'short'});
+    const col = r.steps!==null && r.steps>=10000 ? 'var(--good)' : 'var(--teal)';
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${Math.max(h,0).toFixed(1)}" rx="4" fill="${col}" opacity="${r.steps===null?0:0.85}"><title>${r.date}: ${r.steps===null?'немає даних':fmt(r.steps)+' кроків'}</title></rect>
+      <text x="${(x+w/2).toFixed(1)}" y="${H-6}" text-anchor="middle" font-size="11" fill="var(--ink-soft)">${lbl}</text>`;
+  }).join('');
+  return `<div class="stat-grid" style="margin-top:14px;">
+      <div class="stat"><div class="label">Кроки сьогодні</div><div class="value ${t.steps!==null&&t.steps>=10000?'good':''}">${t.steps===null?'—':fmt(t.steps)}</div></div>
+      <div class="stat"><div class="label">Середнє за 7 днів</div><div class="value">${avg===null?'—':fmt(avg)}</div></div>
+      <div class="stat"><div class="label">Активні ккал сьогодні</div><div class="value">${t.kcal===null?'—':fmt(t.kcal)}</div></div>
+      <div class="stat"><div class="label">Пульс у спокої</div><div class="value">${t.hr===null?'—':fmt(t.hr)+' уд/хв'}</div></div>
+    </div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; margin-top:14px;" role="img" aria-label="Кроки за 7 днів">
+      <line x1="${pad}" x2="${W-pad}" y1="${goalY.toFixed(1)}" y2="${goalY.toFixed(1)}" stroke="var(--line)" stroke-dasharray="4 4"/>
+      <text x="${W-pad}" y="${(goalY-4).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--ink-soft)">10 тис</text>
+      ${bars}
+    </svg>
+    <p class="small">Дані приходять з айфона щовечора о 21:30. Без годинника ккал і пульсу за день не буде, це нормально.</p>`;
+}
+
 function renderDashboard(){
   const c = calc();
   const dates = sortedDates(dailyEntries);
@@ -911,6 +952,9 @@ function renderDashboard(){
       }).join('')}
     </div>
     <div style="margin-top:16px;">${renderActivityTimelineSVG() || '<div class="empty">Ще немає жодного відміченого тренування</div>'}</div>
+    <hr class="divider">
+    <h3>Кроки, ккал і пульс</h3>
+    ${renderHealthBlock()}
     <hr class="divider">
     <h3>Накопичено з початку: план vs факт</h3>
     <p class="small">За ${fmt(daysElapsed)} ${daysWord(daysElapsed)} з початку, за фактичним графіком кожного виду (не пропорційно, а по конкретних днях тижня).</p>
